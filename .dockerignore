@@ -1,0 +1,17 @@
+.git
+input
+output
+models
+cache
+logs
+docs
+**/*.md
+**/*.ps1
+**/*.png
+**/*.mp4
+**/*.ply
+**/*.safetensors
+**/*.ckpt
+**/*.pth
+**/*.pt
+**/*.npz

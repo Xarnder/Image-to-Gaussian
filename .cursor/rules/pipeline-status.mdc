@@ -1,0 +1,16 @@
+---
+description: Image-to-Gaussian goal, blocker, and what already failed on this Windows 4090 Docker host
+alwaysApply: true
+---
+
+# Image-to-Gaussian
+
+Goal: one front-facing full-body PNG → static Gaussian splat `output/<name>/final/character.ply`. Not 4D/animated. 4DAnyone is only for known-camera multiview of a still person, then Nerfstudio Splatfacto.
+
+**Blocked (2026-09-18).** On this Windows 11 + Docker Desktop + WSL2 + RTX 4090 WDDM host, 6-view 4DAnyone never finished. No contact sheet, no 24-view, no PLY. Full log: `docs/STATUS.md`. Short briefing: `AGENTS.md`.
+
+Working: Docker GPU (torch 2.8.0+cu128, CUDA 12.8, True, 4090 23.99 GiB), Noble Python 3.11.15, pin `61e0ccd`, weights/SMPL-X on `models/`, 121-frame static video, GVHMR turtle overlay, GVHMR itself, official `low_memory=True` `auto`→SDPA + Turbo.
+
+Not working: official pose `conv3d` on ThreadPool (`device not ready`); after custom pose batch-3/main-thread, DiT denoise still dies at ~24 GiB / ~97 W (SDPA FFN or Sage). FA3 is Hopper-only. Sage is not the official ≤24 GiB path.
+
+Do not rerun official 6-view in Docker Desktop here expecting success. Do not install FA3. Do not start 24-view/Splatfacto until dense 00–05 MP4s and `contact_sheet.png` exist. Do not bake weights into images. Do not use Jammy python3.11. Do not poll nvidia-smi during the CUDA child.

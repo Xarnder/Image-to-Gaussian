@@ -1,0 +1,37 @@
+# v2 pipeline environment: Python 3.11, native Windows, CUDA 12.8.
+# Installed by scripts/v2_setup_env.ps1 into .venv-i2g (or manually, see README.md) (torch from download.pytorch.org/whl/cu128).
+# gsplat is NOT listed here: the setup script installs SplatKit's SHA-256-verified
+# gsplat-1.4.0+pt28cu128 Windows wheel with --no-deps; its runtime deps are pinned below.
+
+torch==2.8.0+cu128
+torchvision==0.23.0+cu128
+
+# gsplat 1.4.0 runtime deps (versions match SplatKit's working backend)
+jaxtyping==0.3.11
+rich==15.0.0
+ninja==1.13.2
+typing-extensions>=4.10
+
+# trainer (SplatKit parity)
+numpy==1.26.4
+pillow>=10,<13
+safetensors>=0.5,<1
+pytorch-msssim==1.0.0
+imageio>=2.34,<3
+imageio-ffmpeg>=0.5,<1
+
+# geometry, keypoints, matting
+opencv-python>=4.10,<5
+scipy>=1.10,<2
+trimesh>=4,<5
+onnxruntime-gpu>=1.20,<2
+transformers>=4.57,<5
+timm>=1.0,<2
+einops>=0.8,<1
+kornia>=0.7,<1
+
+# ComfyUI API client (step-time watchdog uses the websocket feed)
+websocket-client>=1.8,<2
+
+# image_to_splat.py progress bars
+tqdm>=4.66,<5

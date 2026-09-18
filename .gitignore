@@ -1,0 +1,44 @@
+# ---- Python environments and tools (recreate with scripts\v2_setup_env.ps1) ----
+.venv-i2g/
+.tools/
+__pycache__/
+*.pyc
+
+# ---- Model weights and caches (download with scripts\download_models.py) ----
+models/
+cache/
+*.safetensors
+*.ckpt
+*.pth
+*.pt
+*.gguf
+*.onnx
+*.whl
+*.zip
+*.7z
+
+# ---- Run data ----
+output/
+logs/
+*.log
+*.ply
+*.npz
+*.mp4
+
+# ---- Personal files (never published) ----
+config.local.json
+.env
+input/*
+!input/.gitkeep
+!input/README.md
+test-assets/
+
+# ---- Third-party material not redistributed here ----
+# the 4DAnyone paper: link to arXiv 2608.20335 instead
+papers/*.pdf
+# legacy 4DAnyone/GVHMR source copies used by the old Docker path
+patches/
+
+# ---- OS / editor ----
+.DS_Store
+Thumbs.db

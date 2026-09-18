@@ -1,0 +1,4 @@
+{
+    "python.defaultInterpreterPath": "${workspaceFolder}\\.venv-i2g\\Scripts\\python.exe",
+    "python.terminal.activateEnvironment": true
+}

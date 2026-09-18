@@ -1,0 +1,50 @@
+name: image-to-gaussian
+
+x-gpu: &gpu
+  gpus: all
+  shm_size: "4gb"
+  environment:
+    NVIDIA_VISIBLE_DEVICES: all
+    NVIDIA_DRIVER_CAPABILITIES: compute,utility,graphics
+    HF_HOME: /workspace/cache/huggingface
+    HUGGINGFACE_HUB_CACHE: /workspace/cache/huggingface
+    HF_HUB_CACHE: /workspace/cache/huggingface
+    TRANSFORMERS_CACHE: /workspace/cache/huggingface
+    TORCH_HOME: /workspace/cache/torch
+    XDG_CACHE_HOME: /workspace/cache
+  volumes:
+    - ./input:/workspace/input
+    - ./output:/workspace/output
+    - ./models:/workspace/models
+    - ./cache:/workspace/cache
+    - ./logs:/workspace/logs
+    - ./test-assets:/workspace/test-assets:ro
+    - ./tools:/opt/pipeline:ro
+
+services:
+  4danyone:
+    <<: *gpu
+    build:
+      context: .
+      dockerfile: Dockerfile.4danyone
+      target: full
+      args:
+        FDANYONE_COMMIT: 61e0ccd5c85c01c612b4c4aecb3de148e6f5bae5
+        GVHMR_COMMIT: 6ec3ca39336c50492c0fae65fba2fb831fc7d866
+    image: image-to-gaussian-4danyone:61e0ccd
+    working_dir: /opt/4danyone
+    stdin_open: true
+    tty: true
+
+  nerfstudio:
+    <<: *gpu
+    shm_size: "8gb"
+    build:
+      context: .
+      dockerfile: Dockerfile.nerfstudio
+    image: image-to-gaussian-nerfstudio:1.1.5
+    working_dir: /workspace
+    ports:
+      - "7007:7007"
+    stdin_open: true
+    tty: true

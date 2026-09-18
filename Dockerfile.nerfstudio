@@ -1,0 +1,7 @@
+# Static Splatfacto training/export. Separate from the 4DAnyone environment.
+FROM ghcr.io/nerfstudio-project/nerfstudio:1.1.5
+
+ENV PYTHONUNBUFFERED=1
+WORKDIR /workspace
+# Official image already includes ns-train / ns-export and CUDA 11.8 + PyTorch 2.1.2.
+CMD ["ns-train", "--help"]

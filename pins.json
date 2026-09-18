@@ -1,0 +1,27 @@
+{
+  "4danyone": {
+    "repo": "https://github.com/ant-research/4DAnyone",
+    "commit": "61e0ccd5c85c01c612b4c4aecb3de148e6f5bae5",
+    "date": "2026-09-18",
+    "hf_repo": "AntResearch/4DAnyone",
+    "hf_revision": "4c80e87b805a5f8461cf339cdbe2fb4249e585aa"
+  },
+  "gvhmr": {
+    "repo": "https://github.com/zju3dv/GVHMR.git",
+    "commit": "6ec3ca39336c50492c0fae65fba2fb831fc7d866"
+  },
+  "nerfstudio": {
+    "repo": "https://github.com/nerfstudio-project/nerfstudio",
+    "tag": "v1.1.5",
+    "commit": "6b60855003011b2ca23c2fe3f8e2ca6314c69924",
+    "docker_image": "ghcr.io/nerfstudio-project/nerfstudio:1.1.5"
+  },
+  "pytorch_4danyone": {
+    "torch": "2.8.0",
+    "torchvision": "0.23.0",
+    "cuda_wheel": "cu128",
+    "python": "3.11"
+  },
+  "cuda_base_image": "nvidia/cuda:12.8.1-cudnn-devel-ubuntu24.04",
+  "python_apt": "deadsnakes noble python3.11 (stable, not jammy)"
+}

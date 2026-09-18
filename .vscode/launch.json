@@ -1,0 +1,35 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Image to splat: test image (standard)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}\\image_to_splat.py",
+            "python": "${workspaceFolder}\\.venv-i2g\\Scripts\\python.exe",
+            "args": ["--input", "test-assets\\test-image.png", "--keep_comfy"],
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+        {
+            "name": "Image to splat: retrain only (edit --set values)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}\\image_to_splat.py",
+            "python": "${workspaceFolder}\\.venv-i2g\\Scripts\\python.exe",
+            "args": ["--input", "test-assets\\test-image.png", "--from_stage", "train", "--keep_comfy",
+                     "--set", "iterations=15000"],
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+        {
+            "name": "Image to splat: setup check",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}\\image_to_splat.py",
+            "python": "${workspaceFolder}\\.venv-i2g\\Scripts\\python.exe",
+            "args": ["--check", "--keep_comfy"],
+            "console": "integratedTerminal"
+        }
+    ]
+}

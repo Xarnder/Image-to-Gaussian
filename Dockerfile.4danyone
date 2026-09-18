@@ -1,0 +1,93 @@
+# 4DAnyone inference image on Ubuntu 24.04 Noble.
+# Python 3.11 comes from the deadsnakes *noble* pocket only. Do not mix Jammy.
+# Weights stay on bind-mounted /workspace/models, never in image layers.
+ARG CUDA_IMAGE=nvidia/cuda:12.8.1-cudnn-devel-ubuntu24.04
+FROM ${CUDA_IMAGE} AS python-base
+
+ARG DEBIAN_FRONTEND=noninteractive
+
+# Avoid software-properties-common: it pulls systemd and can hang in BuildKit.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        cmake \
+        curl \
+        ffmpeg \
+        git \
+        git-lfs \
+        gnupg \
+        libgl1 \
+        libglib2.0-0 \
+        libsm6 \
+        libxext6 \
+        libxrender1 \
+        ninja-build \
+        pkg-config \
+        wget \
+    && mkdir -p /etc/apt/keyrings \
+    && curl -fsSL "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0xF23C5A6CF475977595C89F51BA6932366A755776" \
+        | gpg --dearmor -o /etc/apt/keyrings/deadsnakes.gpg \
+    && echo "deb [signed-by=/etc/apt/keyrings/deadsnakes.gpg] http://ppa.launchpad.net/deadsnakes/ppa/ubuntu noble main" \
+        > /etc/apt/sources.list.d/deadsnakes.list \
+    && apt-get update && apt-get install -y --no-install-recommends \
+        python3.11 \
+        python3.11-dev \
+        python3.11-venv \
+        python3.11-distutils \
+    && rm -rf /var/lib/apt/lists/* \
+    && git lfs install --system \
+    && python3.11 --version \
+    && python3.11 - <<'PY'
+import sys
+print(sys.version)
+assert sys.version_info[:2] == (3, 11), sys.version
+assert sys.version_info.releaselevel == "final", sys.version
+assert "rc" not in sys.version.lower() and "beta" not in sys.version.lower(), sys.version
+print("python3.11_ok", sys.version.split()[0])
+PY
+
+RUN python3.11 -m venv /opt/venv
+ENV VIRTUAL_ENV=/opt/venv
+ENV PATH=/opt/venv/bin:$PATH
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV HF_HOME=/workspace/cache/huggingface
+ENV HUGGINGFACE_HUB_CACHE=/workspace/cache/huggingface
+ENV TRANSFORMERS_CACHE=/workspace/cache/huggingface
+ENV TORCH_HOME=/workspace/cache/torch
+ENV XDG_CACHE_HOME=/workspace/cache
+ENV PIP_DISABLE_PIP_VERSION_CHECK=1
+ENV NVIDIA_VISIBLE_DEVICES=all
+ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
+
+FROM python-base AS torch
+RUN pip install --upgrade pip setuptools wheel \
+    && pip install --index-url https://download.pytorch.org/whl/cu128 \
+        "torch>=2.8,<2.9" "torchvision>=0.23,<0.24" \
+    && python -c "import torch; print(torch.__version__); print(torch.version.cuda)"
+COPY tools/gpu_check.py /opt/pipeline/gpu_check.py
+WORKDIR /opt/venv
+CMD ["python", "/opt/pipeline/gpu_check.py"]
+
+FROM torch AS full
+ARG FDANYONE_COMMIT=61e0ccd5c85c01c612b4c4aecb3de148e6f5bae5
+ARG GVHMR_COMMIT=6ec3ca39336c50492c0fae65fba2fb831fc7d866
+
+RUN git clone https://github.com/ant-research/4DAnyone.git /opt/4danyone \
+    && git -C /opt/4danyone checkout --detach ${FDANYONE_COMMIT} \
+    && git -C /opt/4danyone submodule update --init third_party/GVHMR \
+    && git -C /opt/4danyone/third_party/GVHMR checkout --detach ${GVHMR_COMMIT}
+
+WORKDIR /opt/4danyone
+# Keep official fdanyone/*.py untouched. The only image patch is GVHMR's unused
+# `from turtle import forward`, which pulls Tk on this container.
+RUN pip install -r requirements.txt \
+    && sed -i '/^from turtle import forward$/d' third_party/GVHMR/hmr4d/utils/body_model/body_model.py
+
+COPY tools /opt/pipeline
+COPY docker/4danyone-entrypoint.sh /usr/local/bin/4danyone-entrypoint.sh
+RUN sed -i 's/\r$//' /opt/pipeline/*.py /usr/local/bin/4danyone-entrypoint.sh \
+    && chmod +x /usr/local/bin/4danyone-entrypoint.sh /opt/pipeline/*.py
+
+WORKDIR /opt/4danyone
+ENTRYPOINT ["/usr/local/bin/4danyone-entrypoint.sh"]
+CMD ["python", "/opt/pipeline/gpu_check.py"]
