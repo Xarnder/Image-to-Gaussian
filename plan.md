@@ -3,9 +3,13 @@
 **Goal:** one front-facing, full-body photo → one **static** 3D Gaussian splat of that person
 (`output/<name>/final/character.ply`). Not 4D, not animation.
 
-**Status (2026-09-18):** **M0–M3 done. First end-to-end run on the test image produced a complete
-360° `character.ply`.** v2 replaces the blocked 4DAnyone path documented in
-[docs/STATUS.md](docs/STATUS.md).
+**Status (2026-09-19):** **M0–M3 done, plus a measured quality sprint** (see
+[quality_plan.md](quality_plan.md), "Results"). The standard preset now:
+- trains with flat colour, anti-aliasing steps, an anti-needle penalty and camera refinement
+- runs a second pass that fits every view's camera to the first splat and adds the true side views
+- bakes the photo onto the 3D body's face
+
+v2 replaces the blocked 4DAnyone path documented in [docs/STATUS.md](docs/STATUS.md).
 
 | Milestone | Result on `test-assets/test-image.png` |
 |---|---|
@@ -13,15 +17,15 @@
 | M1 body scaffold | SAM 3D Body fit: 98% of the body silhouette inside the photo matte, height 1.72 m, camera 2.77 m away |
 | M2 anchor views | 22 Qwen views (11 angles × 2 seeds), about 14 min. All 22 registered; 10 selected + the photo; drift 24–43 mm |
 | M3 first splat | run 1: 37k Gaussians, 8.7 MB. run 2: 407k Gaussians, 96 MB, photo trained at 1866×2799, 14 min, 3.4 GiB peak VRAM |
+| Quality sprint | Measured against run 2 (details in quality_plan.md): face identity off-angle 0.26 → 0.58, worst face angle −0.02 → 0.36, hold-out PSNR 20.1 → 20.7 dB, needle Gaussians 548 → 0, and no aliasing at viewer size (30 → 36 dB). Calf spikes and teal streaks are gone. |
 
 - **Outputs:** `output/test-image/v2/final/` (latest) and `output/test-image/v2/runs/run{1,2}/`, each with
   `character.ply`, `turntable.mp4`, `preview_8_angles.png` and `report.json`.
 - **Quality:** the front is near-exact at the photo's camera (41–43 dB masked PSNR); the back is
   plausible and consistent.
-- **Known artifacts:**
-  - streaks behind the calves at the pure side views (no training view between 74° and 125°)
-  - the face degrades about 10° off the photo's elevation (the generated front-ish views disagree on
-    facial features)
+- **Known artifacts (after the sprint):**
+  - a patchy ring where the baked face meets the cheeks and hairline, seen from 30°+ to the side
+  - softer detail on the back and sides than on the front
 
 **Learned on this machine:**
 

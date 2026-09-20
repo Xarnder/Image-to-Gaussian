@@ -137,7 +137,14 @@ part of the person if it projects **inside the matte in every image**. Keeping o
  the real camera of every generated view, quality checks, best views selected, contact sheet
     │
     ▼  S5 TRAIN ──────────── gsplat (our Python, CUDA)
- visual hull → 15k training steps → cleanup → character.ply + turntable.mp4
+ visual hull → 15k training steps → cleanup → a first character.ply
+    │
+    ▼  S6 SECOND PASS ────── render-and-compare camera fitting (our Python, CUDA)
+ every view's camera refitted against that splat, true side views rescued, retrained
+    │
+    ▼  S7 ORBIT VIDEO ────── Wan 2.2 Fun-Control (ComfyUI) + gsplat
+ that splat filmed as a depth video on 7 chosen camera paths, repainted as the real person,
+ retrained on 550+ frames whose cameras are exact → character.ply + turntable.mp4
 ```
 
 **Who runs what:**
@@ -159,6 +166,9 @@ own GPU work, we tell ComfyUI to unload its models (`POST /free`).
   and gives every generated view its own small colour and camera corrections (S5).
 - **The big models don't fit a 24 GB GPU at full precision**, so they run in ComfyUI with fp8
   weights and automatic offloading; the rest runs in a lean environment.
+- **Separately drawn views still disagree**, so the last pass replaces them with one continuous video
+  along cameras we chose ourselves (S7). Nothing has to be estimated: the video follows a depth
+  rendering pixel for pixel, so every frame's camera is known by construction.
 
 ---
 
@@ -387,11 +397,16 @@ This is the most important stage. For each generated image:
 
 ### Stage 5: Train the splat
 
-**Code:** [i2g/splat.py](i2g/splat.py), [i2g/splatkit_vendor.py](i2g/splatkit_vendor.py), [i2g/pipeline.py](i2g/pipeline.py) `run_train()`
+**Code:** [i2g/splat.py](i2g/splat.py), [i2g/priors.py](i2g/priors.py), [i2g/splatkit_vendor.py](i2g/splatkit_vendor.py), [i2g/pipeline.py](i2g/pipeline.py) `run_train()`
 **Output:** `final\character.ply`, `turntable.mp4`, `preview_8_angles.png`, `photo_vs_render.png`, `report.json`
 
 **1. Load the selected views.** Each one has its image, matte, intrinsics K, measured camera and a
 weight: photo 1.0, generated 0.6. The photo uses the **full-resolution** crop, with K scaled to match.
+Every view that shows the face also gets a **face mask and face depth**, rendered from the SAM 3D
+body mesh. The mesh's face lines up with the photo's face within a few pixels, but its **depth** comes
+from one frontal photo. So the head is first **moved back along the photo's camera rays** until the
+mesh face fits inside the side views' silhouettes (`face_align`; 2.7 cm on the test image). Without
+this, the face sat in front of the hair like a mask.
 
 **2. Initialise from the visual hull.**
 - Build a 1.2 cm voxel grid around the scaffold, with margin.
@@ -399,51 +414,131 @@ weight: photo 1.0, generated 0.6. The photo uses the **full-resolution** crop, w
   one view to disagree.
 - The **surface voxels** (~17–18k) become the first Gaussians, coloured from the view that faces them
   best.
+- The hull has no face relief, so its points in front of the face are replaced by ~1,000 points on
+  the mesh's face, coloured from the photo.
 
 **3. The training loop** (15,000 steps by default). Each step:
 1. Pick a view: the photo 25% of the time, the others share the rest.
-2. Render it with **gsplat** (`rasterization`) at half resolution for the first 2,000 steps, then full.
+2. Render it with **gsplat** (`rasterization`): half resolution for the first 2,000 steps. After
+   that, half the steps render at a **random smaller size** ("multiscale"). A splat fitted only to
+   the high-resolution photo aliases (goes dark and blotchy) when a viewer shows it smaller.
 3. Paint a **random background colour** behind both the render and the target. This forces the matte
    edges to be learnt properly.
 4. For generated views, apply the view's own **3×3 colour correction** (the photo's is fixed). Those
    views have slightly different lighting and white balance.
-5. After step 1,000, apply the view's small **camera correction** (a rotation + translation "delta";
-   the photo's is fixed).
-6. Compute the loss:
-   `0.8·L1 + 0.2·(1−SSIM) + 0.5·|alpha − matte| + 0.2·VGG-perceptual`, times the view's weight, plus
-   small penalties that keep the corrections near zero. On large images the perceptual term uses a
-   random 1024² crop inside the person.
-7. Backpropagate, take an **Adam** step per parameter group (the position learning rate decays
+5. Between steps 1,500 and 10,000, refine each generated view's **camera** (a small rotation +
+   translation; the photo's is fixed). Keypoint cameras are several cm off.
+6. **The photo owns the face.** In generated views, the colour gradient on the inner face (6 cm
+   around the face centre) is switched off. Their faces are different people in detail, and mixing
+   them causes double eyes. The cheeks, jaw and hair beyond that are still learnt from them.
+7. Compute the loss:
+   `0.8·L1 + 0.2·(1−SSIM) + 0.5·|alpha − matte| + 0.2·VGG-perceptual`, times the view's weight, plus:
+   - a face-depth term (the rendered depth should match the mesh's face)
+   - an **anisotropy penalty**: no Gaussian more than 6× longer than its second axis. Needles hide in
+     the gaps between views and show up as streaks and spikes from the side.
+   - small penalties that keep the corrections near zero
+
+   On large images the perceptual term uses a random 1024² crop inside the person.
+8. Backpropagate, take an **Adam** step per parameter group (the position learning rate decays
    exponentially), then run **gsplat's `DefaultStrategy`**:
    - **densification** (clone or split Gaussians whose screen-space gradient is high), every 100
      steps from step 500 to 12,000
    - **pruning** (opacity < 0.05, too large)
    - an opacity **reset** every 3,000 steps
+9. Keep Gaussians near the face on a **thin shell** (±2 mm) around the mesh's face.
 
-**4. Colour model.** Spherical harmonics at **degree 1**: 4 coefficients per colour channel. Higher
-degrees overfit the gaps between our sparse views; see §10.
+**4. Colour model.** One colour per Gaussian (spherical-harmonics **degree 0**). With any
+view-dependent band, directions no view covered extrapolate to odd colours: those were the teal
+streaks between the legs.
 
-**5. Clean up.** Delete near-transparent Gaussians, and "floaters" that fall outside the matte in more
-than 40% of the views that see them.
+**5. Clean up.** Delete:
+- near-transparent Gaussians
+- "floaters" that fall outside the matte in more than 40% of the views that see them
+- any Gaussian still more than 10× longer than wide (and over 3 cm long)
 
-**6. Export** `character.ply` in the standard INRIA 3DGS layout (§7.4).
+**6. Face bake.** Replace the inner face with the **photo unprojected onto the mesh's face**: one
+flat Gaussian per high-res photo pixel (~27,000). Each sits at the mesh's depth for that pixel, lies
+in the skin, is as wide as the pixel, and has the pixel's colour.
+- **Hair** falling over the edge of the face (dark areas connected to the outside) is left to the
+  splat's own 3D hair.
+- The step checks first that the mesh's eyes and nose land on the photo's (face detector). If they
+  don't, it is skipped.
 
-**7. Render and measure.** Render the turntable (72 frames at 5° elevation), the 8-angle preview, and
-masked PSNR against every training view (photo view ~42–44 dB).
+The result is a face that looks like the photo head-on and stays one coherent face from the side.
+Before the bake, a trained face looked right only from the photo's angle.
+
+**7. Export** `character.ply` in the standard INRIA 3DGS layout (§7.4).
+
+**8. Render and measure.** Render the turntable (72 frames at 5° elevation), the 8-angle preview, and
+masked PSNR against every training view.
 
 **Main knobs** (`SplatConfig`, changeable with `--set key=value`):
 
 | Setting | Default | Effect |
 |---|---|---|
 | `iterations` | 15000 | longer = sharper, slower |
-| `sh_degree` | 1 | view-dependent colour detail |
-| `grow_grad2d` | 0.0002 | lower = more Gaussians (≈400k at this value) |
+| `sh_degree` | 0 | 1+ adds view-dependent colour but streaks at unseen angles |
+| `grow_grad2d` | 0.0002 | lower = more Gaussians (≈300k at this value) |
 | `view_weight` / `photo_weight` | 0.6 / 1.0 | trust in generated views vs the photo |
 | `perceptual_weight` | 0.2 | sharper texture vs pixel accuracy |
 | `alpha_weight` | 0.5 | how strongly silhouettes are enforced |
-| `pose_reg`, `pose_lr` | 10, 1e-4 | camera correction; currently too stiff (see quality_plan item 3) |
+| `aniso_weight`, `aniso_ratio` | 0.1, 6 | anti-needle penalty |
+| `multiscale` | 0.5 | share of zoomed-out steps (anti-aliasing) |
+| `pose_lr`, `pose_reg` | 5e-4, 0.1 | camera correction of generated views |
+| `face_weight`, `face_core_m` | 0, 0.06 | generated views' say on the inner face (0 = none) and its radius |
+| `face_bake` | true | bake the photo onto the mesh's face after training |
 
----
+### Stage 6: Second pass (standard and high presets)
+
+**Code:** [i2g/reregister.py](i2g/reregister.py), [i2g/pipeline.py](i2g/pipeline.py) `run_refine()`,
+optionally [i2g/restore.py](i2g/restore.py)
+
+The first splat is a consensus of all the views, so it can measure them better than keypoints can.
+
+1. **Refit every candidate view's camera** by render-and-compare. Minimise the difference between
+   the splat's silhouette and colours and the view's matte and image:
+   - coarse to fine (1/8, 1/4, 1/2 resolution)
+   - from three starting cameras: the keypoint one, an orbit camera at its angle, and the requested
+     angle
+   - keep the lowest loss
+
+   Cameras move 1.5–15 cm, and silhouette agreement goes from ~0.90 to ~0.95. True profile views,
+   which the keypoints misplace, are rescued this way.
+2. **Re-select views** with the fitted cameras (best silhouette agreement first, at least 12° apart).
+3. Optionally (`--restore`), render the first splat on a 96-camera orbit and clean the orbit with
+   **SeedVR2** as three videos. Those frames join as extra low-weight views with exact cameras.
+4. **Retrain from scratch** and export as in Stage 5. The first result moves to `final\history\`.
+
+### Stage 7: Orbit video pass (standard and high presets; the largest quality step)
+
+**Code:** [i2g/orbit_stage.py](i2g/orbit_stage.py), which wraps the `pacgs\` package
+([pacgs_explained.md](pacgs_explained.md) in plain English,
+[next-stage-research/docs/pacgs_face_fix.md](next-stage-research/docs/pacgs_face_fix.md) for the
+measurements).
+
+The splat from Stage 6 is good enough to act as a *stand-in* for the person: its shape carries hair,
+clothes and shoes. So:
+
+1. **Choose the cameras.** Seven paths (`--orbit_rigs`), each 81 frames starting at the photo's own
+   camera: `360` a body orbit; `face` the same orbit zoomed on the head (3x, the principal point
+   tracking it); `face_up`, `face_down`, `face_high`, `face_top` the same close-up rising to +30, dipping
+   to -20, rising to +55 and passing over the crown at +95, all pivoting about the head so it stays the
+   same distance away; `helix` a body orbit rising to +30.
+2. **Render the stand-in as a depth video** along each path (inverse depth, near = white, one
+   normalisation per rig). The start image is an exact crop of the photo through that rig's frame-0
+   intrinsics. *The stand-in must be the splat, not the body mesh: a mesh has no hair and no clothing,
+   and the video model will faithfully remove both.*
+3. **Repaint it** with Wan 2.2 Fun-Control A14B (fp8) plus the 4-step Lightning LoRAs, in ComfyUI, via
+   the custom node `I2G_Wan22FunControlToVideo` in `comfy_nodes\i2g_export`.
+4. **Matte and score** every frame (BiRefNet). A clip whose matte disagrees with the stand-in's own
+   silhouette by more than 10 per cent has re-styled the person and is dropped.
+5. **Retrain from scratch** on the photo plus all the frames, 40k steps, each frame with the camera it
+   was generated for (`kind: "video"`, per-frame intrinsics, no camera refinement - the cameras are
+   exact by construction). The head close-ups are sampled twice as often as the body frames, and the
+   photo keeps its own anti-aliasing setting.
+
+Every eighth frame is held out for a leave-frames-out score. About 2 h on the reference PC, most of it
+Wan; `--no_orbit` skips the whole stage.
 
 ## 6. The orchestration layer (the easy-run tool)
 
@@ -451,7 +546,8 @@ masked PSNR against every training view (photo view ~42–44 dB).
 |---|---|
 | [run_image_to_splat.bat](run_image_to_splat.bat) | double-click / drag-and-drop launcher. Runs setup the first time, calls `python3` inside `.venv-i2g`, keeps the window open at the end. |
 | [image_to_splat.py](image_to_splat.py) | the command-line tool: arguments, presets, preflight, starting and stopping ComfyUI, progress bars, error messages with fixes, final summary. If you start it with any other Python, it re-launches itself inside `.venv-i2g`. |
-| [i2g/pipeline.py](i2g/pipeline.py) | the five stages as functions (`run_ingest` ... `run_train`), folder layout (`RunPaths`), options (`RunOptions`), and **resume logic** |
+| [run_batch_to_splat.bat](run_batch_to_splat.bat) / [batch_to_splat.py](batch_to_splat.py) | the same, for a folder of photos: one `image_to_splat.py` process per photo, one at a time, ComfyUI kept up across the batch, finished photos skipped so a stopped batch resumes. A failed photo is recorded and the batch carries on. |
+| [i2g/pipeline.py](i2g/pipeline.py) | the seven stages as functions (`run_ingest` ... `run_orbit`), folder layout (`RunPaths`), options (`RunOptions`), and **resume logic** |
 | [i2g/log.py](i2g/log.py) / [i2g/errors.py](i2g/errors.py) | console + file logging that doesn't break progress bars / `PipelineError(message, hint)` |
 
 **Resume logic ("stamps").** When a stage finishes, it writes `<stage folder>\stage.json` containing:
@@ -463,7 +559,9 @@ On the next run, a stage is **skipped** if its stamp still matches. Change a tra
 only training reruns. Use a different photo in the same folder, and the old run is moved to
 `_archive\`. **Nothing is ever deleted.** Previous final outputs move to `final\history\<time>\`.
 
-Dependencies: `ingest → body`, `ingest → views`, `body + views → register`, `register → train`.
+Dependencies: `ingest → body`, `ingest → views`, `body + views → register`, `register → train`,
+`train → refine`. The train and refine stamps hold the **full** training config, so changing a
+default in `splat.py` also retrains.
 
 Typical commands: see the top of `image_to_splat.py`, or run `python3 image_to_splat.py --help`.
 
@@ -541,6 +639,11 @@ D:\Image-to-Gaussian\
 │  ├─ register.py                Stage 4
 │  ├─ cameras.py                 camera maths: projection, look-at, Umeyama, PnP, silhouettes
 │  ├─ splat.py                   Stage 5 (training, cleaning, export, rendering)
+│  ├─ priors.py                  face prior from the body mesh: alignment, depth targets, shell, face bake
+│  ├─ reregister.py              Stage 6: render-and-compare camera fitting against the first splat
+│  ├─ restore.py                 Stage 6 option: orbit renders cleaned by SeedVR2 as extra views
+│  ├─ evaluate.py                quality metrics (hold-out views, face identity, needles, floaters)
+│  ├─ experiment.py              train and score settings side by side on one run's views
 │  ├─ splatkit_vendor.py         VGG-19 perceptual loss + PLY writer (MIT, from SplatKit)
 │  ├─ pipeline.py                stages + resume stamps
 │  ├─ vram.py, log.py, errors.py, env_check.py, run.py
@@ -560,6 +663,8 @@ output\<name>\v2\
 ├─ 02_views\    <tag>\s<seed>.png ...  views.json  stage.json
 ├─ 03_qa\       masks\  sam3d\  sam3d_cache.json  registration.json  contact_sheet.png  stage.json
 ├─ 06_train\    stage.json
+├─ 07_refine\   stage.json
+├─ 08_orbit\    controls\<rig>\  start\<rig>.png  gen\<rig>rc0\  data\<rig>\  datall\  stage.json
 ├─ logs\        run_<time>.log (full DEBUG log)  comfyui_<time>.log
 ├─ _archive\    anything replaced (never deleted)
 └─ final\       character.ply  turntable.mp4  preview_8_angles.png  contact_sheet.png
@@ -619,6 +724,10 @@ Build and **check** each step before moving on. Every step has a visible result.
     - Then densification, cleanup and export. ✅ `character.ply` opens in SuperSplat.
 11. **Orchestration.** Stamps, CLI, `.bat`.
     - ✅ Rerunning skips everything; changing `--set iterations=...` reruns only training.
+12. **Stage 7.** Render one depth orbit of the splat, generate one clip, look at it next to its control
+    frames, then add the remaining camera paths.
+    - ✅ The person in the video matches the photo's hair and clothes; frame 0 is the photo itself.
+    - ✅ A splat trained on the clip reproduces held-out frames of it at about 30 dB.
 
 **Reading order for the code:** `paths.py` → `cameras.py` → `comfy_client.py` → `ingest.py` →
 `body.py` → `views.py` → `register.py` → `splat.py` → `pipeline.py` → `image_to_splat.py`.
@@ -653,11 +762,20 @@ RTX 4090 24 GB, 32 GB RAM, models on an HDD.
 | Stage 3: views | 10 min (7 images) | 14 min (22 images) | ~22 GB (ComfyUI offloads) |
 | Stage 4: register | 1 min | 3 min | ~5 GB |
 | Stage 5: train | 4 min (6k steps) | 14 min (15k steps) | 2–3.5 GB |
-| **Total** | **~18 min** | **~35 min** | |
+| Stage 6: second pass | – | 15 min | 2–4 GB |
+| Stage 7: orbit video | – | 60 min (7 clips of 81 frames) | ~17 GB (ComfyUI) |
+| Stage 7: matte + retrain | – | 40 min (40k steps, 550+ frames) | ~18 GB |
+| **Total** | **~18 min** | **~3 h** | |
+
+With `--no_orbit` the standard preset stops after Stage 6, in about 35 minutes.
 
 Results on the test image:
 - **Draft:** 148k Gaussians, 35 MB PLY, photo-view PSNR 43.8 dB.
-- **Standard (run 2):** 407k Gaussians, 96 MB.
+- **Standard, no orbit:** 407k Gaussians, 96 MB.
+- **Standard with the orbit pass:** 460k Gaussians, 109 MB, photo 36.6 dB at the viewer's own size,
+  0.016 per cent stray Gaussians, and a face that holds together from every elevation up to straight
+  over the crown (the numbers are in
+  [next-stage-research/docs/pacgs_face_fix.md](next-stage-research/docs/pacgs_face_fix.md)).
 
 ---
 

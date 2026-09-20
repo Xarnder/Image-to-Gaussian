@@ -12,6 +12,55 @@ making anything else worse**.
 
 ---
 
+## Results of the 2026-09-19 quality sprint (measured)
+
+Every change below was trained on the same test image and views, then scored by the harness
+(`i2g/evaluate.py`, run through `i2g/experiment.py`):
+
+- **photo dB / HR dB:** masked PSNR against the photo, at canvas size (a typical viewer size) and at
+  the photo's native resolution.
+- **face id:** mean ArcFace similarity (InsightFace buffalo_l) between the photo's face and the splat's
+  face in 15 close-ups, from 30° left to 30° right and up to 30° above the photo's view.
+  **face min** is the worst of those 15.
+- **hold:** 5 generated views never used in training (back, right, back-left, front-right,
+  left-elevated). Each one's camera is first fitted to the splat, because their own keypoint cameras
+  are 5–12 cm off.
+- **needles:** Gaussians over 8× longer than wide and over 3 cm long.
+
+<!-- RESULTS_TABLE -->
+| Run | What changed | photo dB | HR dB | face id | face min | hold dB | hold SSIM | hold VGG ↓ | hold IoU | needles |
+|---|---|---|---|---|---|---|---|---|---|---|
+| E0_run2 | baseline: run 2 (SH 1, HR photo, 11 views) | 30.19 | 41.45 | 0.257 | -0.023 | 20.06 | 0.801 | 0.055 | 0.936 | 548 |
+| E1_sh0_ms | + flat colour (SH 0) + multiscale | 37.25 | 35.67 | 0.254 | -0.029 | 20.25 | 0.804 | 0.056 | 0.936 | 804 |
+| E2_face | + face prior: depth, mesh start, photo-only face colour 0.25 | 37.33 | 35.61 | 0.222 | 0.000 | 20.35 | 0.804 | 0.057 | 0.935 | 686 |
+| E3_shell | E2 + face shell | 37.22 | 35.59 | 0.242 | -0.004 | 20.24 | 0.803 | 0.057 | 0.935 | 634 |
+| E3_aniso | E2 + anti-needle | 37.29 | 35.44 | 0.255 | 0.045 | 20.25 | 0.803 | 0.057 | 0.935 | 0 |
+| E3_pose | E2 + camera refinement | 37.08 | 35.80 | 0.245 | -0.015 | 20.45 | 0.811 | 0.056 | 0.937 | 724 |
+| E4a_cand | shell + anti-needle + cameras, face colour 0 | 36.91 | 35.45 | 0.340 | 0.031 | 20.14 | 0.803 | 0.058 | 0.936 | 0 |
+| E4b_cand_fit15 | E4a on fitted cameras, 15 views (incl. 90° side) | 36.76 | 36.32 | 0.259 | 0.000 | 20.50 | 0.809 | 0.056 | 0.943 | 0 |
+| E4c_interior | E4a + interior clearing (rejected) | 36.70 | 35.47 | 0.290 | 0.000 | 19.37 | 0.781 | 0.065 | 0.913 | 0 |
+| E6_final_fit15 | final recipe: E4b + inner-face core + face bake (v1) | 35.41 | 35.19 | 0.526 | 0.326 | 20.73 | 0.816 | 0.054 | 0.945 | 0 |
+| E6_pixbake | final recipe with the per-pixel face bake | 35.59 | 35.60 | 0.575 | 0.364 | 20.68 | 0.816 | 0.054 | 0.945 | 0 |
+| E7_restore | E6 + 96 SeedVR2-restored orbit frames | 35.49 | 36.37 | 0.621 | 0.427 | 20.23 | 0.811 | 0.056 | 0.943 | 0 |
+| FINAL_pipeline | **the pipeline itself, standard preset, end to end, face aligned** (hold-out columns not comparable: its second pass trains on 2 of the 5 hold-out views) | 35.68 | 35.58 | 0.583 | 0.344 | 23.69 | 0.856 | 0.042 | 0.950 | 0 |
+
+### What each finding means
+
+| Finding | Evidence | Now |
+|---|---|---|
+| The "HR photo" of run 2 made the splat alias at normal viewing sizes (darker, blotchy face) | photo dB 30.2 at canvas size vs 41.5 at native size | `multiscale=0.5`: random zoomed-out steps. Canvas size is now 37 dB, with no aliasing |
+| Teal/green streaks between the legs came from view-dependent colour (spherical harmonics) extrapolating to angles no view covers | rendering run 1 without its SH band 1 removes them | `sh_degree=0` |
+| Calf spikes are needle Gaussians hidden in the 74°→125° and 234°→284° gaps. They sit inside the visual hull, so hull carving does nothing | 54% of run 2's Gaussians over 6:1, 1% over 1000:1. Hull carving removed 2 | `aniso_weight=0.1` (+ `needle_ratio=10` cleanup): 0 needles left |
+| Keypoint cameras are loose: render-and-compare fitting moves them 1.5–15 cm and raises silhouette agreement from ~0.90 to ~0.95 | `i2g/reregister.py` on 38 views | in-training refinement (`pose_lr=5e-4, pose_reg=0.1`) plus the new second pass (views re-selected 12° apart) |
+| Camera words in the multi-angle LoRA name the *target* view, and the model gets closer to it from a nearby view | "right side view" from the photo lands at 74–77°. From the 45° view it lands at **91°** | "full" preset adds chained views (r2, l2, br2, bl2). "standard" adds r2, l2 |
+| Pure profile views confuse the SAM 3D keypoints (the far limbs are hidden) | r2 at 90°: keypoint drift 11–13 cm, rejected | rescued by camera fitting (IoU 0.64 → 0.86) |
+| The broken face off-angle is a thick cloud plus junk *inside* the head showing through a semi-transparent face | depth prior: 36 mm → 0.7 mm error, still ghosted. Removing the face layer reveals random colours inside the head | face shell + face bake. Interior clearing was tested: body-wide it removed real surface (hold-out −0.8 dB), so it is off |
+| Face bake: the photo unprojected onto the SAM 3D face, one flat Gaussian per photo pixel | face id 0.34 → 0.53, worst face 0.03 → 0.33 (first version, random 0.5 mm samples). The per-pixel version also keeps the front view sharp | `face_bake` |
+| The body mesh's head sat **~2.7 cm too far forward** relative to where the generated side views put it. Pinned to the mesh, the face floated in front of the hair like a mask. (Spotted by eye on the first "after" renders.) | Every prior-free splat put the face 31–35 mm behind the mesh face. A tight visual hull around the head needs a 24–27 mm push before 98% of the mesh face fits the side views' silhouettes | `face_align`: before any face prior, the head is moved back along the photo camera's rays by the measured amount (the photo view stays pixel-identical). Check, with each view's camera fitted per model: head pixels rendered outside the side views' silhouettes fell to 3.4% (was 4.4% with the face on the raw mesh, 4.6% for run 2) |
+| SeedVR2 cannot share the GPU with training on this PC (VRAM spills into system RAM, everything slows 5–20×) | observed twice | pipeline runs ComfyUI work and training strictly one after another |
+
+---
+
 ## Summary
 
 | # | Change | Main target | Confidence | Dev time | Extra runtime per image |
@@ -37,6 +86,20 @@ making anything else worse**.
 - **Sprint 2:** items 5–7.
 - **Sprint 3:** items 8–11.
 - **Research bets:** items 12–14.
+
+**Status after the 2026-09-19 sprint** (numbers in "Results" above):
+
+| # | Item | Status |
+|---|---|---|
+| 0 | Harness | **done**: `i2g/evaluate.py` + `i2g/experiment.py` |
+| 1 | Anti-streak | **done**: anisotropy loss + needle cleanup, 0 needles left. Hull carving was tried and did nothing (the spikes sit inside the hull) |
+| 2 | Photo owns the face | **done**, and went further: face prior, face shell, inner-face ownership, and the **per-pixel face bake**. This is the biggest visible win |
+| 3 | Camera refinement | **done**: in training (`pose_lr 5e-4`, `pose_reg 0.1`), plus render-and-compare fitting in the second pass |
+| 4 | Coverage | **done**: chained gap views (true sides at ~90°/260°, back diagonals), low angles in "full", 12° spacing after fitting |
+| 5 | Render → repair → retrain | **done with SeedVR2** (`--restore`, high preset). Best face and HR front, slightly lower hold-out agreement |
+| 6 | MCMC | not evaluated (implemented as `strategy=mcmc`, smoke-tested only) |
+| 8 | Geometry priors | body-mesh face depth and shell are in. Body-wide interior clearing hurt and is off |
+| 7, 9–14 | | not started |
 
 ---
 

@@ -25,13 +25,15 @@ from .paths import MODELS_DIR, REPO_ROOT
 
 log = get_logger("pipeline")
 
-STAGES = ["ingest", "body", "views", "register", "train"]
+STAGES = ["ingest", "body", "views", "register", "train", "refine", "orbit"]
 STAGE_TITLES = {"ingest": "Cut out the person", "body": "Fit a 3D body", "views": "Generate views (Qwen)",
-                "register": "Measure view cameras", "train": "Train the Gaussian splat"}
+                "register": "Measure view cameras", "train": "Train the Gaussian splat",
+                "refine": "Second pass: refit cameras, retrain",
+                "orbit": "Orbit video pass: calibrated turntable video (Wan), retrain"}
 STAGE_DIRS = {"ingest": "00_ingest", "body": "01_body", "views": "02_views", "register": "03_qa",
-              "train": "06_train"}
+              "train": "06_train", "refine": "07_refine", "orbit": "08_orbit"}
 DEPENDS = {"ingest": [], "body": ["ingest"], "views": ["ingest"], "register": ["body", "views"],
-           "train": ["register"]}
+           "train": ["register"], "refine": ["train"], "orbit": ["refine"]}
 OUTPUT_FILES = ["character.ply", "turntable.mp4", "preview_8_angles.png", "photo_vs_render.png", "report.json",
                 "contact_sheet.png", "run_summary.json"]
 
@@ -68,6 +70,19 @@ class RunOptions:
     seeds: int = 2
     photo_hr: bool = True            # train the photo view at its native resolution
     splat: dict = field(default_factory=dict)   # SplatConfig overrides, e.g. {"iterations": 20000}
+    refine: bool = False             # second pass: fit every view's camera to the first splat, retrain
+    restore: bool = False            # ... plus SeedVR2-restored orbit renders of the first splat as views
+    orbit: bool = False              # orbit video pass: a calibrated turntable video (Wan), then retrain
+    # camera paths for that video (i2g/orbit_stage.py, pacgs.orbit.RIGS)
+    orbit_rigs: str = "360,face,face_up,face_down,face_high,face_top,helix"
+    orbit_frames: int = 81                      # frames per clip (Wan 2.2 is trained on 81)
+    orbit_size: tuple[int, int] = (480, 832)    # width, height of the generated frames
+    orbit_seed: int = 1001
+    orbit_prompt: str = ""                      # empty: a generic studio-orbit description
+    orbit_holdout_every: int = 8                # 1 in N frames kept out of training, to score the result
+    orbit_face_boost: float = 2.0               # training steps per head close-up frame, relative to a body frame
+                                                # (2.0 with three face clips: measured as f6/f7; 3.0 was for one)
+    orbit_iterations: int = 40000               # the orbit pass trains longer than the earlier passes (0: as preset)
 
 
 # --- stamps ---------------------------------------------------------------------------------------
@@ -85,9 +100,18 @@ def _stamp_path(paths: RunPaths, stage: str) -> Path:
 
 
 def _settings(opts: RunOptions, stage: str) -> dict:
-    s = {"ingest": {}, "body": {"vfov_deg": opts.vfov_deg}, "views": {"views": opts.views, "seeds": opts.seeds},
-         "register": {"views": opts.views, "seeds": opts.seeds, "vfov_deg": opts.vfov_deg},
-         "train": {"photo_hr": opts.photo_hr, "splat": opts.splat}}[stage]
+    if stage in ("train", "refine", "orbit"):
+        # the full effective config, so a change of the defaults in splat.py also retrains
+        from .splat import config_dict
+        s = {"photo_hr": opts.photo_hr, "splat": config_dict(make_splat_config(opts))}
+        if stage == "refine":
+            s |= {"refine": opts.refine, "restore": opts.restore}
+        if stage == "orbit":
+            s |= {"orbit": opts.orbit, "rigs": opts.orbit_rigs, "frames": opts.orbit_frames,
+                  "size": list(opts.orbit_size), "seed": opts.orbit_seed, "prompt": opts.orbit_prompt}
+    else:
+        s = {"ingest": {}, "body": {"vfov_deg": opts.vfov_deg}, "views": {"views": opts.views, "seeds": opts.seeds},
+             "register": {"views": opts.views, "seeds": opts.seeds, "vfov_deg": opts.vfov_deg}}[stage]
     return json.loads(json.dumps(s, sort_keys=True))
 
 
@@ -119,7 +143,7 @@ def stage_status(paths: RunPaths, opts: RunOptions, stage: str) -> tuple[bool, s
         return False, "an earlier stage changed"
     if stamp.get("settings") != _settings(opts, stage):
         return False, "settings changed"
-    if stage == "train" and not (paths.output / "character.ply").exists():
+    if stage in ("train", "refine") and not (paths.output / "character.ply").exists():
         return False, "output missing"
     return True, "up to date"
 
@@ -346,31 +370,32 @@ def parse_setting(text: str):
     return key, value
 
 
-def run_train(paths: RunPaths, opts: RunOptions, client: ComfyClient, make_bar=None) -> dict:
+def _train_and_export(paths: RunPaths, opts: RunOptions, cfg, world: dict, registration, stage: str,
+                      make_bar=None) -> dict:
+    """Train on `registration` (registration.json or records), clean, export the deliverables."""
     import imageio.v2 as imageio
     import torch
 
-    from . import body, vram
+    from . import vram
     from .cameras import azimuth_elevation, orbit_camera
     from .splat import clean, config_dict, export_ply, load_views, psnr, render_rgb, train
 
-    cfg = make_splat_config(opts)
-    _archive_outputs(paths)
-    client.free()
-    world = body.load_world(paths.stage_dir("body"))
-    views = load_views(paths.stage_dir("register") / "registration.json", world["K"], cfg, "cuda",
-                       hr_photo=paths.stage_dir("ingest") / "source_hr_rgba.png" if opts.photo_hr else None)
-    log.info("Training on %d views (%s), %d iterations", len(views["names"]), ", ".join(views["names"]),
-             cfg.iterations)
+    views = load_views(registration, world["K"], cfg, "cuda",
+                       hr_photo=paths.stage_dir("ingest") / "source_hr_rgba.png" if opts.photo_hr else None,
+                       world=world)
+    log.info("Training on %d views (%s), %d iterations", len(views["names"]),
+             ", ".join(n for n in views["names"] if not n.startswith("orbit_")) +
+             (f" + {sum(k == 'restored' for k in views['kinds'])} restored orbit frames"
+              if "restored" in views["kinds"] else ""), cfg.iterations)
 
-    report: dict = {"config": config_dict(cfg), "views": views["names"]}
+    report: dict = {"stage": stage, "config": config_dict(cfg), "views": views["names"]}
     bar = make_bar(total=cfg.iterations, desc="Training splat", unit="it") if make_bar else NullBar()
     try:
-        with vram.stage("train", report):
+        with vram.stage(stage, report):
             params, stats = train(views, world, cfg, bar)
     except torch.cuda.OutOfMemoryError as exc:
         raise PipelineError("the GPU ran out of memory while training",
-                            hint="Close other GPU apps and ComfyUI tabs, then rerun with --from_stage train. "
+                            hint=f"Close other GPU apps and ComfyUI tabs, then rerun with --from_stage {stage}. "
                                  "If it persists: --no_hr_photo, or --set grow_grad2d=0.0004 (fewer Gaussians).") \
             from exc
     finally:
@@ -380,12 +405,18 @@ def run_train(paths: RunPaths, opts: RunOptions, client: ComfyClient, make_bar=N
 
     bar = make_bar(total=4, desc="Exporting", unit="step") if make_bar else NullBar()
     report["clean"] = clean(params, views, refined, cfg)
+    if cfg.face_bake:
+        from .splat import bake_face_into
+        export_ply(params, paths.stage_dir(stage) / "character_unbaked.ply")   # the bake can be redone from this
+        report["face_bake"] = bake_face_into(params, world, paths.stage_dir("ingest") / "source_hr_rgba.png", cfg)
     bar.update(1)
     export_ply(params, paths.output / "character.ply")
     bar.update(1)
 
     per_view = {}
     for i, view_name in enumerate(views["names"]):
+        if views["kinds"][i] == "restored":
+            continue
         img = (views["images"][i].cpu().numpy() * 255).round().astype(np.uint8)
         mat = views["alphas"][i][..., 0].cpu().numpy()
         vh, vw = img.shape[:2]
@@ -418,22 +449,120 @@ def run_train(paths: RunPaths, opts: RunOptions, client: ComfyClient, make_bar=N
     log.info("Splat: %s Gaussians (%.0f MB), photo-view PSNR %.1f dB, %.1f min training, peak VRAM %.1f GiB",
              f"{report['clean']['remaining']:,}", ply_mb, per_view[views["names"][0]], report["train_seconds"] / 60,
              report["stages"][0]["peak_allocated_gib"])
-    write_stamp(paths, opts, "train", {"gaussians": report["clean"]["remaining"], "psnr": per_view})
+    del views, params
+    torch.cuda.empty_cache()
     return {"gaussians": report["clean"]["remaining"], "ply_mb": round(ply_mb, 1),
-            "train_minutes": round(report["train_seconds"] / 60, 1)}
+            "train_minutes": round(report["train_seconds"] / 60, 1), "psnr": per_view}
 
 
-def _archive_outputs(paths: RunPaths) -> None:
-    """Keep every previous result: move it into output/history/<time>/ before writing new files."""
+def _free_comfy_for_training(client: ComfyClient) -> None:
+    """Unload ComfyUI's models before training, unless it is busy with other jobs (a ComfyUI shared with
+    other work): unloading would disrupt them, and training beside them is slow, so say so."""
+    if client.busy():
+        log.warning("ComfyUI is busy with other jobs: leaving its models loaded. Training shares the GPU with "
+                    "them and can be much slower (VRAM spills into system RAM) until they finish.")
+        return
+    client.free()
+
+
+def _aligned_world(paths: RunPaths, cfg) -> dict:
+    """The body scaffold with its head moved back to where the generated views put it (priors.align_face);
+    only the face priors use the head, so this is skipped when they are all off."""
+    from . import body
+    from .priors import align_face
+    world = body.load_world(paths.stage_dir("body"))
+    if not cfg.face_align or not (cfg.face_bake or cfg.face_shell or cfg.face_depth_weight > 0 or cfg.face_mesh_init):
+        return world
+    records = json.loads((paths.stage_dir("register") / "registration.json").read_text())
+    world, push = align_face(world, records, "cuda")
+    log.info("Face: the body mesh's head moved %.1f cm back to fit the generated views' silhouettes", push * 100)
+    return world
+
+
+def run_train(paths: RunPaths, opts: RunOptions, client: ComfyClient, make_bar=None) -> dict:
+    cfg = make_splat_config(opts)
+    _archive_outputs(paths)
+    _free_comfy_for_training(client)
+    world = _aligned_world(paths, cfg)
+    result = _train_and_export(paths, opts, cfg, world, paths.stage_dir("register") / "registration.json",
+                               "train", make_bar)
+    write_stamp(paths, opts, "train", {"gaussians": result["gaussians"], "psnr": result.pop("psnr")})
+    return result
+
+
+def run_refine(paths: RunPaths, opts: RunOptions, client: ComfyClient, make_bar=None) -> dict:
+    """Second pass. The first splat is a consensus of all views, so each view's camera can now be fitted
+    to it by render-and-compare (much tighter than keypoints, and it rescues side views the body fitter
+    misread). The views are re-selected with those cameras and the splat is retrained from scratch;
+    with --restore, SeedVR2-cleaned orbit renders of the first splat join as extra low-weight views."""
+    import torch
+
+    from .evaluate import load_ply
+    from .register import select_views
+    from .reregister import refit_records
+
+    if not opts.refine:
+        log.info("Second pass is off (the standard/high presets and --refine turn it on)")
+        write_stamp(paths, opts, "refine", {"skipped": True})
+        return {"skipped": True}
+    cfg = make_splat_config(opts)
+    _free_comfy_for_training(client)
+    world = _aligned_world(paths, cfg)
+    refine_dir = paths.stage_dir("refine")
+    records = json.loads((paths.stage_dir("register") / "registration.json").read_text())
+    params = load_ply(paths.output / "character.ply")
+    bar = make_bar(total=len(records) - 1, desc="Fitting cameras to the splat", unit="view") if make_bar else NullBar()
+    try:
+        records = refit_records(params, world, records, bar=bar)
+    finally:
+        bar.close()
+    select_views(records, min_separation_deg=12.0)     # fitted cameras are reliable enough to use more views
+    (refine_dir / "registration_fitted.json").write_text(json.dumps(records, indent=1), encoding="utf-8")
+    kept = [f"{r['tag']}_s{r['seed']}" for r in records[1:] if r.get("selected")]
+    log.info("Cameras fitted: %d of %d views usable, %d selected", sum(bool(r.get("accepted")) for r in records[1:]),
+             len(records) - 1, len(kept))
+
+    if opts.restore:
+        from .restore import orbit_cameras, render_orbit, restore_orbit
+        cams = orbit_cameras(world)
+        render_orbit(params, world, cams, refine_dir / "orbit")
+        del params
+        torch.cuda.empty_cache()
+        bar = make_bar(total=3, desc="Restoring orbit (SeedVR2)", unit="ring") if make_bar else NullBar()
+        try:
+            records = records + restore_orbit(client, refine_dir / "orbit", cams, opts.name, bar=bar)
+        finally:
+            bar.close()
+            client.free()
+    else:
+        del params
+        torch.cuda.empty_cache()
+
+    _archive_outputs(paths, copy=True)
+    result = _train_and_export(paths, opts, cfg, world, records, "refine", make_bar)
+    write_stamp(paths, opts, "refine", {"gaussians": result["gaussians"], "psnr": result.pop("psnr"),
+                                        "selected": kept})
+    return result
+
+
+def _archive_outputs(paths: RunPaths, copy: bool = False) -> None:
+    """Keep every previous result in output/history/<time>/ before writing new files. With copy, the
+    current files also stay in place until overwritten (the second pass: if it is interrupted, the
+    first pass's splat is still the result and the train stage stays done)."""
     existing = [f for f in OUTPUT_FILES if (paths.output / f).exists() and f != "contact_sheet.png"]
     if not existing:
         return
     dest = paths.output / "history" / time.strftime("%Y%m%d-%H%M%S")
     dest.mkdir(parents=True, exist_ok=True)
     for f in existing:
-        shutil.move(str(paths.output / f), str(dest / f))
-    log.info("Previous result moved to %s", dest)
+        (shutil.copy2 if copy else shutil.move)(str(paths.output / f), str(dest / f))
+    log.info("Previous result %s %s", "copied to" if copy else "moved to", dest)
+
+
+def run_orbit(paths: RunPaths, opts: RunOptions, client: ComfyClient, make_bar=None) -> dict:
+    from .orbit_stage import run_orbit as _run
+    return _run(paths, opts, client, make_bar)
 
 
 RUNNERS = {"ingest": run_ingest, "body": run_body, "views": run_views, "register": run_register,
-           "train": run_train}
+           "train": run_train, "refine": run_refine, "orbit": run_orbit}

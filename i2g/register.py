@@ -107,12 +107,17 @@ def verdict(rec: dict, height: int) -> list[str]:
     return reasons
 
 
-def select_views(records: list[dict]) -> None:
-    """Photo first, then accepted views best-first, skipping ones within MIN_SEPARATION_DEG of a kept view."""
+def select_views(records: list[dict], min_separation_deg: float = MIN_SEPARATION_DEG) -> None:
+    """Photo first, then accepted views best-first, skipping ones within MIN_SEPARATION_DEG of a kept view.
+    Best = highest silhouette agreement with the first splat once cameras were fitted (reregister.py),
+    else the lowest keypoint score."""
+    def rank(r: dict) -> float:
+        return -r["fit_iou"] if "fit_iou" in r else r["score"]
+
     kept = [records[0]]
-    for rec in sorted((r for r in records[1:] if r["accepted"]), key=lambda r: r["score"]):
+    for rec in sorted((r for r in records[1:] if r["accepted"]), key=rank):
         angle = (rec["azimuth_deg"], rec["elevation_deg"])
-        if all(_angle_between(angle, (k["azimuth_deg"], k["elevation_deg"])) >= MIN_SEPARATION_DEG for k in kept):
+        if all(_angle_between(angle, (k["azimuth_deg"], k["elevation_deg"])) >= min_separation_deg for k in kept):
             kept.append(rec)
     for rec in records:
         rec["selected"] = any(rec is k for k in kept)
@@ -180,7 +185,7 @@ def register_all(client: ComfyClient, matter, world: dict, dirs: dict, name: str
         if default_fov and cache_key not in cache and (existing := _find_existing_npz(name, key)):
             cache[cache_key] = str(existing)
 
-        expected = expected_angles(item["prompt"])
+        expected = tuple(item["expected_deg"]) if item.get("expected_deg") else expected_angles(item["prompt"])
         base = {"tag": item["tag"], "seed": item["seed"], "prompt": item["prompt"], "path": str(path),
                 "mask": str(mask_path), "requested_deg": list(expected),
                 "sharpness_rel": sharpness(rgb, alpha) / photo_sharp}

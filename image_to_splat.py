@@ -8,7 +8,8 @@ EXAMPLE (VS Code terminal, in D:\Image-to-Gaussian):
 
 MORE EXAMPLES
     python3 image_to_splat.py -i input\front.png --preset draft          # quick rough result (~20 min)
-    python3 image_to_splat.py -i input\front.png --preset high           # more views, longer training (~50 min)
+    python3 image_to_splat.py -i input\front.png --no_orbit              # skip the orbit video pass (~35 min)
+    python3 image_to_splat.py -i input\front.png --preset high           # every pass (~2 h 30)
     python3 image_to_splat.py -i input\front.png --from_stage train --set iterations=20000   # retrain only
     python3 image_to_splat.py -i input\front.png --working_dir D:\splat_work\me --keep_comfy
     python3 image_to_splat.py --check                                    # test the setup without a run
@@ -57,12 +58,22 @@ sys.path.insert(0, str(REPO_ROOT))
 from i2g.paths import COMFY_ROOT as DEFAULT_COMFY_ROOT, COMFY_URL as DEFAULT_COMFY_URL  # noqa: E402
 
 # (set comfy_root in config.local.json once; see config.example.json)
-STAGES = ["ingest", "body", "views", "register", "train"]
+STAGES = ["ingest", "body", "views", "register", "train", "refine", "orbit"]   # same as i2g.pipeline.STAGES
+ORBIT_RIGS = "360,face,face_up,face_down,face_high,face_top,helix"   # body orbit, four head close-ups, rising orbit
 PRESETS = {
     # views: which camera angles; seeds: candidates per angle; iterations: splat training steps
-    "draft": {"views": "draft", "seeds": 1, "iterations": 6000, "photo_hr": False},
-    "standard": {"views": "standard", "seeds": 2, "iterations": 15000, "photo_hr": True},
-    "high": {"views": "full", "seeds": 3, "iterations": 25000, "photo_hr": True},
+    # refine: second pass that fits every view's camera to the first splat, adds the views it rescues
+    # (true side views) and retrains; restore: plus SeedVR2-cleaned orbit renders (see quality_plan.md)
+    # orbit: the turntable-video pass (i2g/orbit_stage.py, pacgs_explained.md), the best quality we have:
+    # it renders that splat as a depth video along camera paths we choose, has Wan repaint it as the real
+    # person, and retrains on those frames, whose cameras are exact. orbit_rigs picks the camera paths.
+    # orbit_iterations: the orbit pass trains on far more views than the earlier passes, so it runs longer
+    "draft": {"views": "draft", "seeds": 1, "iterations": 6000, "photo_hr": False, "refine": False, "restore": False,
+              "orbit": False, "orbit_rigs": "360", "orbit_iterations": 15000},
+    "standard": {"views": "standard", "seeds": 2, "iterations": 15000, "photo_hr": True, "refine": True,
+                 "restore": False, "orbit": True, "orbit_rigs": ORBIT_RIGS, "orbit_iterations": 40000},
+    "high": {"views": "full", "seeds": 3, "iterations": 25000, "photo_hr": True, "refine": True, "restore": True,
+             "orbit": True, "orbit_rigs": ORBIT_RIGS, "orbit_iterations": 40000},
 }
 IMAGE_TYPES = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
 
@@ -72,9 +83,10 @@ def build_parser() -> argparse.ArgumentParser:
         prog="image_to_splat.py",
         description="Turn one front-facing, full-body photo into a static 3D Gaussian splat (.ply).",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="presets: draft = 7 angles x 1 seed, 6k iterations (~20 min); standard = 11 angles x 2 seeds, "
-               "15k iterations (~35 min); high = 15 angles x 3 seeds, 25k iterations (~50 min). "
-               "First ComfyUI start adds ~5-8 min.")
+        epilog="presets: draft = 7 angles x 1 seed, 6k iterations, no orbit video (~20 min); standard = 11 angles "
+               "x 2 seeds, 15k iterations, second pass, orbit video on five camera paths (~2 h 30); high = "
+               "15 angles x 3 seeds, 25k iterations, SeedVR2 pass, same orbit video (~3 h). --no_orbit drops "
+               "the orbit video (back to the older, faster pipeline). First ComfyUI start adds ~5-8 min.")
     io = p.add_argument_group("input and output")
     io.add_argument("-i", "--input", type=Path, help="front-facing full-body photo (png, jpg, webp)")
     io.add_argument("-o", "--output_dir", type=Path,
@@ -90,6 +102,19 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("--iterations", type=int, help="splat training iterations (overrides preset)")
     q.add_argument("--no_hr_photo", action="store_true",
                    help="train the photo at canvas size instead of full resolution (faster, softer front)")
+    q.add_argument("--refine", action=argparse.BooleanOptionalAction, default=None,
+                   help="second pass: fit every view's camera to the first splat, re-select views, retrain "
+                        "(overrides preset)")
+    q.add_argument("--restore", action=argparse.BooleanOptionalAction, default=None,
+                   help="in the second pass, also add SeedVR2-restored orbit renders as extra views "
+                        "(needs the SeedVR2 ComfyUI nodes; overrides preset)")
+    q.add_argument("--orbit", action=argparse.BooleanOptionalAction, default=None,
+                   help="turntable-video pass: render the splat as a depth video, have Wan repaint it as the "
+                        "person, retrain on those frames with their exact cameras (overrides preset)")
+    q.add_argument("--orbit_rigs", help="camera paths for that video, comma-separated: 360 (body orbit), face "
+                                        "(head close-up), face_up / face_down (the head from above / below), "
+                                        "face_high / face_top (steeply above / over the crown), "
+                                        "helix (rising body orbit) (overrides preset)")
     q.add_argument("--fov", type=float, default=40.0, help="assumed vertical field of view of the photo (degrees)")
     q.add_argument("--set", action="append", default=[], metavar="KEY=VALUE",
                    help="override a training setting from i2g/splat.py SplatConfig, e.g. --set sh_degree=0 "
@@ -217,6 +242,8 @@ def main(argv=None) -> int:
     from i2g.log import get_logger, setup_logging
     from i2g.pipeline import STAGE_TITLES, RunOptions, RunPaths, archive_dir, check_same_photo, parse_setting, \
         stage_status
+    from i2g.pipeline import STAGES as PIPELINE_STAGES
+    assert STAGES == PIPELINE_STAGES, "image_to_splat.STAGES is out of date with i2g.pipeline.STAGES"
 
     paths = RunPaths(work=work, output=output)
     # only create folders once the photo is known to exist (a typo shouldn't leave empty folders behind)
@@ -229,9 +256,12 @@ def main(argv=None) -> int:
     log = get_logger("cli")
 
     preset = dict(PRESETS[args.preset])
-    for key, value in (("views", args.views), ("seeds", args.seeds), ("iterations", args.iterations)):
+    for key, value in (("views", args.views), ("seeds", args.seeds), ("iterations", args.iterations),
+                       ("refine", args.refine), ("restore", args.restore), ("orbit", args.orbit),
+                       ("orbit_rigs", args.orbit_rigs)):
         if value is not None:
             preset[key] = value
+    preset["refine"] = preset["refine"] or preset["restore"]
     if args.no_hr_photo:
         preset["photo_hr"] = False
 
@@ -245,14 +275,21 @@ def main(argv=None) -> int:
         for item in args.set:
             key, value = parse_setting(item)
             splat_overrides[key] = value
+        # --iterations applies to every pass; --set iterations=N wins outright, so the orbit pass leaves it alone
+        orbit_iterations = 0 if "iterations" in {k for k, _ in (parse_setting(s) for s in args.set)} \
+            else (args.iterations or preset["orbit_iterations"])
         opts = RunOptions(name=name, input_image=input_image or Path(), vfov_deg=args.fov, views=preset["views"],
-                          seeds=preset["seeds"], photo_hr=preset["photo_hr"], splat=splat_overrides)
+                          seeds=preset["seeds"], photo_hr=preset["photo_hr"], splat=splat_overrides,
+                          refine=preset["refine"], restore=preset["restore"], orbit=preset["orbit"],
+                          orbit_rigs=preset["orbit_rigs"], orbit_iterations=orbit_iterations)
 
         log.info("=" * 78)
         log.info("Image-to-Gaussian   photo: %s", input_image or "(setup check)")
         if not args.check:
-            log.info("  preset %s (%s views x %d seeds, %d iterations%s)", args.preset, opts.views, opts.seeds,
-                     splat_overrides["iterations"], "" if opts.photo_hr else ", photo at canvas size")
+            log.info("  preset %s (%s views x %d seeds, %d iterations%s%s%s)", args.preset, opts.views, opts.seeds,
+                     splat_overrides["iterations"], "" if opts.photo_hr else ", photo at canvas size",
+                     ", second pass" + (" + SeedVR2 orbit" if opts.restore else "") if opts.refine else "",
+                     f", orbit video ({opts.orbit_rigs})" if opts.orbit else "")
             log.info("  working folder: %s", work)
             log.info("  output folder:  %s", output)
         log.info("  log file:       %s", log_file)
@@ -274,7 +311,7 @@ def main(argv=None) -> int:
         else:
             comfy_proc = start_comfy(args.comfy_root, args.comfy_url, log_dir, args.sage, args.comfy_timeout,
                                      make_bar)
-        info = check_comfy(client)
+        info = check_comfy(client, restore=opts.restore)
         log.info("  ok   ComfyUI %s on %s (%.1f GiB VRAM free); all nodes and model files found",
                  info["comfyui_version"], info["device"], info["vram_free_gib"])
         if args.check:

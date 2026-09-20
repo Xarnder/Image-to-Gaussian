@@ -1,4 +1,4 @@
-﻿"""Start, check and stop the user's portable ComfyUI for the pipeline."""
+"""Start, check and stop the user's portable ComfyUI for the pipeline."""
 from __future__ import annotations
 
 import os
@@ -150,9 +150,25 @@ def stop_kept_comfy(comfy_root: Path, client: ComfyClient) -> bool:
     return True
 
 
-def check_comfy(client: ComfyClient) -> dict:
+RESTORE_NODES = ["SeedVR2LoadDiTModel", "SeedVR2LoadVAEModel", "SeedVR2VideoUpscaler", "VHS_LoadImagesPath"]
+
+
+def check_comfy(client: ComfyClient, restore: bool = False) -> dict:
     """Verify the nodes and model files the pipeline needs, using ComfyUI's own file lookup."""
     info = client.object_info()
+    if restore:
+        from .paths import COMFY_ROOT
+        from .restore import SEEDVR2_DIT, SEEDVR2_VAE
+        missing = [n for n in RESTORE_NODES if n not in info]
+        if missing:
+            raise PipelineError(f"--restore needs ComfyUI nodes that are missing: {', '.join(missing)}",
+                                hint="Install 'ComfyUI-SeedVR2_VideoUpscaler' (numz) and 'ComfyUI-VideoHelperSuite' "
+                                     "with ComfyUI-Manager and restart ComfyUI, or run with --no-restore.")
+        for f in (SEEDVR2_DIT, SEEDVR2_VAE):
+            if not (COMFY_ROOT / "ComfyUI" / "models" / "SEEDVR2" / f).exists():
+                raise PipelineError(rf"--restore needs ComfyUI\models\SEEDVR2\{f}",
+                                    hint="Download it from huggingface.co/numz/SeedVR2_comfyUI into that folder "
+                                         "(the SeedVR2 node would otherwise fetch it silently), or use --no-restore.")
     missing_nodes = [n for n in REQUIRED_NODES if n not in info]
     if "I2G_SaveMHRPose" in missing_nodes:
         raise PipelineError("ComfyUI is running without the pipeline's helper node (I2G_SaveMHRPose)",

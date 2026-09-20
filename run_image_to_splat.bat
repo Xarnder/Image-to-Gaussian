@@ -13,6 +13,14 @@ rem         run_image_to_splat.bat --help
 rem
 rem  Result: <output_dir>\character.ply  (default: output\<photo name>\v2\final\)
 rem  View it: drag character.ply onto https://superspl.at/editor
+rem
+rem  The default (standard) preset ends with the orbit video pass: the splat is rendered as a depth
+rem  video along seven camera paths (body orbit, four head close-ups - level, above, below, steeply
+rem  above and over the crown - and a rising body orbit), Wan repaints them as the real person, and the
+rem  splat is retrained on those frames, whose cameras are exact. Best quality we have
+rem  (pacgs_explained.md); ~3 h in total.
+rem  For the older, faster pipeline (~35 min):  run_image_to_splat.bat --input "photo.png" --no_orbit
+rem  For a whole folder of photos, one after another:  run_batch_to_splat.bat
 rem ===========================================================================================
 setlocal EnableExtensions
 chcp 65001 >nul

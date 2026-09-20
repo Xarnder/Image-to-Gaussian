@@ -80,8 +80,10 @@ class ComfyClient:
     def object_info(self, node_class: str | None = None) -> dict:
         return self._get_json("/object_info" + (f"/{urllib.parse.quote(node_class)}" if node_class else ""))
 
-    def upload_image(self, path: str | Path, subfolder: str = "i2g", overwrite: bool = True) -> str:
-        """Upload into ComfyUI's input folder; returns the name LoadImage expects."""
+    def upload_image(self, path: str | Path, subfolder: str = "i2g", overwrite: bool = True,
+                     name: str | None = None) -> str:
+        """Upload into ComfyUI's input folder (as `name`, default the file name); returns the name
+        LoadImage expects."""
         path = Path(path)
         boundary = uuid.uuid4().hex
         fields = {"subfolder": subfolder, "overwrite": "true" if overwrite else "false", "type": "input"}
@@ -90,7 +92,7 @@ class ComfyClient:
             body += (f"--{boundary}\r\nContent-Disposition: form-data; name=\"{key}\"\r\n\r\n"
                      f"{value}\r\n").encode()
         body += (f"--{boundary}\r\nContent-Disposition: form-data; name=\"image\"; "
-                 f"filename=\"{path.name}\"\r\nContent-Type: application/octet-stream\r\n\r\n").encode()
+                 f"filename=\"{name or path.name}\"\r\nContent-Type: application/octet-stream\r\n\r\n").encode()
         body += path.read_bytes() + f"\r\n--{boundary}--\r\n".encode()
         resp = json.loads(self._request("POST", "/upload/image", bytes(body),
                                         {"Content-Type": f"multipart/form-data; boundary={boundary}"},
@@ -154,6 +156,14 @@ class ComfyClient:
 
     def free(self, unload_models: bool = True, free_memory: bool = True) -> None:
         self._post_json("/free", {"unload_models": unload_models, "free_memory": free_memory}, timeout=120)
+
+    def busy(self) -> bool:
+        """True if ComfyUI is running or has queued jobs (someone else's, when we are not using it)."""
+        try:
+            q = self._get_json("/queue")
+        except Exception:  # noqa: BLE001 - not reachable: nothing to protect
+            return False
+        return bool(q.get("queue_running") or q.get("queue_pending"))
 
     def interrupt(self) -> None:
         self._request("POST", "/interrupt", b"", {"Content-Type": "application/json"})

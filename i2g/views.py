@@ -44,6 +44,8 @@ class ViewRequest:
     azimuth: str      # LoRA azimuth token
     elevation: str    # LoRA elevation token
     distance: str = "medium shot"
+    source: str | None = None                        # rotate from this generated view (same seed), not the photo
+    expect_deg: tuple[float, float] | None = None    # where a chained view should land (registration prior)
 
     @property
     def prompt(self) -> str:
@@ -65,16 +67,29 @@ DEFAULT_VIEWS = [
     ViewRequest("l_hi", "left side view", "elevated shot"),
 ]
 
+# Chained views fill the gaps the photo-sourced ones leave. The camera tokens name the target view of
+# the subject (not a rotation of the input camera), and the model gets much closer to it from a nearby
+# view: "right side view" from the photo lands at ~75 deg, from the 45 deg view at ~91 deg (measured).
+# Chaining backwards (a side view asked for a front quarter) flipped sides, so chains only go outward.
+GAP_VIEWS = [
+    ViewRequest("r2", "right side view", "eye-level shot", source="fr", expect_deg=(90.0, 0.0)),
+    ViewRequest("l2", "left side view", "eye-level shot", source="fl", expect_deg=(270.0, 0.0)),
+]
+BACK_GAP_VIEWS = [
+    ViewRequest("br2", "back-right quarter view", "eye-level shot", source="r2", expect_deg=(135.0, 0.0)),
+    ViewRequest("bl2", "back-left quarter view", "eye-level shot", source="l2", expect_deg=(225.0, 0.0)),
+]
+
 VIEW_PRESETS = {
     # 7 eye-level angles: fastest usable coverage
     "draft": DEFAULT_VIEWS[:7],
-    # + elevated ring (top of head, shoulders)
-    "standard": DEFAULT_VIEWS,
-    # + low angles (under the chin and raised arms)
-    "full": DEFAULT_VIEWS + [ViewRequest("f_lo", "front view", "low-angle shot"),
-                             ViewRequest("b_lo", "back view", "low-angle shot"),
-                             ViewRequest("r_lo", "right side view", "low-angle shot"),
-                             ViewRequest("l_lo", "left side view", "low-angle shot")],
+    # + elevated ring (top of head, shoulders) + true side views
+    "standard": DEFAULT_VIEWS + GAP_VIEWS,
+    # + back diagonals from the side views + low angles (under the chin and raised arms)
+    "full": DEFAULT_VIEWS + GAP_VIEWS + BACK_GAP_VIEWS + [ViewRequest("f_lo", "front view", "low-angle shot"),
+                                                         ViewRequest("b_lo", "back view", "low-angle shot"),
+                                                         ViewRequest("r_lo", "right side view", "low-angle shot"),
+                                                         ViewRequest("l_lo", "left side view", "low-angle shot")],
 }
 
 
@@ -122,7 +137,7 @@ def generate_views(client: ComfyClient, canvas: Path, out_dir: Path, name: str, 
                    views=DEFAULT_VIEWS, seeds=(101, 202), bar=None) -> list[dict]:
     """Generate every (view, seed) not already in views.json; resumable after an interruption."""
     bar = bar or NullBar()
-    image_name = client.upload_image(canvas)
+    photo_name = client.upload_image(canvas)
     manifest_path = out_dir / "views.json"
     manifest = json.loads(manifest_path.read_text()) if manifest_path.exists() else []
     manifest = [m for m in manifest if Path(m["path"]).exists()]  # drop entries whose image was deleted
@@ -137,6 +152,12 @@ def generate_views(client: ComfyClient, canvas: Path, out_dir: Path, name: str, 
             bar.set_postfix_str(f"{view.tag} seed {seed}" +
                                 (" (loading Qwen into VRAM, ~2-5 min)" if first_job else ""))
             start = time.perf_counter()
+            image_name = photo_name
+            if view.source:
+                src = out_dir / view.source / f"s{seed}.png"
+                if not src.exists():
+                    raise RuntimeError(f"view {view.tag} rotates from {view.source} seed {seed}, which is missing")
+                image_name = client.upload_image(src, name=f"{name}_{view.source}_s{seed}.png")
             wf = qwen_angle_workflow(image_name, view.prompt, seed, width, height,
                                      f"i2g/{name}/views/{view.tag}_s{seed}")
             log.debug("queue %s seed %d: %s", view.tag, seed, view.prompt)
@@ -147,6 +168,7 @@ def generate_views(client: ComfyClient, canvas: Path, out_dir: Path, name: str, 
                 raise RuntimeError(f"Qwen produced no image for {view.tag} seed {seed}")
             client.download(files[0], dest)
             record = asdict(view) | {"prompt": view.prompt, "seed": seed, "path": str(dest),
+                                     "expected_deg": list(view.expect_deg or expected_angles(view.prompt)),
                                      "seconds": round(time.perf_counter() - start, 1)}
             manifest.append(record)
             manifest_path.write_text(json.dumps(manifest, indent=1), encoding="utf-8")

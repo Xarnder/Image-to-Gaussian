@@ -3,6 +3,9 @@
 I2G_SaveMHRPose writes SAM 3D Body's MHR_POSE_DATA (per-frame, per-person vertices, keypoints,
 camera, plus mesh faces) to an .npz in ComfyUI's output folder, so the v2 pipeline running outside
 ComfyUI can build the body scaffold from it. Installed by scripts/v2_link_nodes.ps1 (a junction).
+
+The research code (pacgs: proxy-controlled video) also uses I2G_LoadImages / I2G_SaveImages (image
+folders by absolute path) and I2G_Wan22FunControlToVideo (Wan 2.2 Fun-Control with a start image).
 """
 import json
 import os
@@ -83,5 +86,91 @@ class I2G_SaveMHRPose:
         return {"ui": {"i2g_files": files}, "result": (os.path.join(full_dir, base + ".npz"),)}
 
 
-NODE_CLASS_MAPPINGS = {"I2G_SaveMHRPose": I2G_SaveMHRPose}
-NODE_DISPLAY_NAME_MAPPINGS = {"I2G_SaveMHRPose": "Save SAM3D Body Pose Data (.npz) [i2g]"}
+_IMAGE_EXT = (".png", ".jpg", ".jpeg", ".webp")
+
+
+def _image_files(path):
+    if os.path.isdir(path):
+        return [os.path.join(path, f) for f in sorted(os.listdir(path)) if f.lower().endswith(_IMAGE_EXT)]
+    return [path]
+
+
+class I2G_LoadImages:
+    """One image file, or every image in a folder (sorted by name), as an IMAGE batch. Used by the
+    research code (pacgs) to hand ComfyUI control videos and start images by absolute path."""
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {"path": ("STRING", {"default": ""})}}
+
+    RETURN_TYPES = ("IMAGE",)
+    FUNCTION = "load"
+    CATEGORY = "image-to-gaussian"
+
+    @classmethod
+    def IS_CHANGED(cls, path):
+        # re-run when any file changes, even if the path string stays the same
+        return ";".join(f"{f}:{os.path.getmtime(f)}:{os.path.getsize(f)}" for f in _image_files(path))
+
+    def load(self, path):
+        from PIL import Image
+        files = _image_files(path)
+        if not files:
+            raise ValueError(f"no images in {path}")
+        frames = [np.asarray(Image.open(f).convert("RGB"), np.float32) / 255.0 for f in files]
+        return (torch.from_numpy(np.stack(frames)),)
+
+
+class I2G_SaveImages:
+    """Write an IMAGE batch as lossless PNGs <prefix>0000.png ... into an absolute directory."""
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {"images": ("IMAGE",), "directory": ("STRING", {"default": ""}),
+                             "prefix": ("STRING", {"default": "frame_"})}}
+
+    RETURN_TYPES = ()
+    FUNCTION = "save"
+    OUTPUT_NODE = True
+    CATEGORY = "image-to-gaussian"
+
+    def save(self, images, directory, prefix):
+        from PIL import Image
+        os.makedirs(directory, exist_ok=True)
+        frames = (images.clamp(0, 1).cpu().numpy() * 255).round().astype(np.uint8)
+        for i, frame in enumerate(frames):
+            Image.fromarray(frame).save(os.path.join(directory, f"{prefix}{i:04d}.png"))
+        return {"ui": {"text": [f"saved {len(frames)} frames to {directory}"]}}
+
+
+class I2G_Wan22FunControlToVideo:
+    """ComfyUI's Wan22FunControlToVideo with start_image exposed. The core node's execute() already
+    handles it (the Fun-Control patch embedding has start-image channels), but its schema lists only
+    ref_image and control_video. start_image pins the first frame; ref_image adds reference latents."""
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {"positive": ("CONDITIONING",), "negative": ("CONDITIONING",), "vae": ("VAE",),
+                             "width": ("INT", {"default": 480, "min": 16, "max": 8192, "step": 16}),
+                             "height": ("INT", {"default": 832, "min": 16, "max": 8192, "step": 16}),
+                             "length": ("INT", {"default": 81, "min": 1, "max": 8192, "step": 4}),
+                             "batch_size": ("INT", {"default": 1, "min": 1, "max": 64})},
+                "optional": {"start_image": ("IMAGE",), "ref_image": ("IMAGE",), "control_video": ("IMAGE",)}}
+
+    RETURN_TYPES = ("CONDITIONING", "CONDITIONING", "LATENT")
+    RETURN_NAMES = ("positive", "negative", "latent")
+    FUNCTION = "encode"
+    CATEGORY = "image-to-gaussian"
+
+    def encode(self, positive, negative, vae, width, height, length, batch_size, start_image=None,
+               ref_image=None, control_video=None):
+        from comfy_extras.nodes_wan import Wan22FunControlToVideo
+        out = Wan22FunControlToVideo.execute(positive, negative, vae, width, height, length, batch_size,
+                                             ref_image=ref_image, start_image=start_image,
+                                             control_video=control_video)
+        return out.args
+
+
+NODE_CLASS_MAPPINGS = {"I2G_SaveMHRPose": I2G_SaveMHRPose, "I2G_LoadImages": I2G_LoadImages,
+                       "I2G_SaveImages": I2G_SaveImages, "I2G_Wan22FunControlToVideo": I2G_Wan22FunControlToVideo}
+NODE_DISPLAY_NAME_MAPPINGS = {"I2G_SaveMHRPose": "Save SAM3D Body Pose Data (.npz) [i2g]",
+                              "I2G_LoadImages": "Load Images from Path [i2g]",
+                              "I2G_SaveImages": "Save Images to Path [i2g]",
+                              "I2G_Wan22FunControlToVideo": "Wan22 Fun Control To Video + start image [i2g]"}

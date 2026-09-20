@@ -9,8 +9,15 @@ Gaussian splat on all of it. It runs natively on Windows with an RTX 4090 (24 GB
 
 ```
 photo ─► cut-out (BiRefNet) ─► 3D body (SAM 3D Body) ─► new views (Qwen-Image-Edit-2511 + angles LoRA)
-      ─► measure every view's camera (keypoint PnP) ─► train the splat (gsplat) ─► character.ply
+      ─► measure every view's camera (keypoint PnP) ─► train the splat (gsplat)
+      ─► orbit video pass: that splat as a depth video ─► Wan 2.2 Fun-Control repaints it as the person
+      ─► retrain on those frames, whose cameras are exact ─► character.ply
 ```
+
+The orbit video pass is the newest and largest quality step: it fixes the face at off-angles and cuts
+stray blobs to a tenth. [pacgs_explained.md](pacgs_explained.md) explains it in plain English,
+[next-stage-research/docs/pacgs_results_sprint1.md](next-stage-research/docs/pacgs_results_sprint1.md)
+has the measurements. Skip it with `--no_orbit` for a result in about a third of the time.
 
 New to the project? [pipeline_breakdown.md](pipeline_breakdown.md) explains every stage, tool and
 library for beginners, and how to rebuild it from scratch.
@@ -140,13 +147,41 @@ python3 image_to_splat.py --help
 | `-i`, `--input` | the photo: one person, front-facing, full body, ideally 1500+ px tall |
 | `-o`, `--output_dir` | where the result goes; created if missing (default `output\<name>\v2\final`) |
 | `-w`, `--working_dir` | intermediate files; created if missing (default `output\<name>\v2`) |
-| `--preset draft\|standard\|high` | about 20 / 35 / 50 min; more angles, seeds and training in the higher presets |
+| `--preset draft\|standard\|high` | about 20 min / 3 h / 3 h 30. standard adds a second pass (cameras fitted to the first splat, true side views) and the orbit video pass on seven camera paths. high adds more angles and seeds, longer training and a SeedVR2 pass |
+| `--orbit` / `--no_orbit` | the orbit video pass (on by default in standard and high); `--no_orbit` gives the older, faster pipeline |
+| `--orbit_rigs 360,face,face_up,face_down,face_high,face_top,helix` | camera paths: `360` body orbit, `face` head close-up, `face_up` / `face_down` the head from above / below, `face_high` / `face_top` steeply above / over the crown, `helix` rising body orbit |
 | `--views`, `--seeds`, `--iterations`, `--fov`, `--no_hr_photo` | fine-tune a preset |
+| `--refine` / `--no-refine` | second pass: fit every view's camera to the first splat, add the views it rescues, retrain |
+| `--restore` / `--no-restore` | in the second pass, also train on SeedVR2-cleaned orbit renders (needs the SeedVR2 ComfyUI nodes) |
 | `--set KEY=VALUE` | change any training setting (`SplatConfig` in `i2g/splat.py`); repeatable |
 | `--from_stage`, `--only_stage`, `--force` | redo part of a run; old results are archived, never deleted |
 | `--keep_comfy`, `--stop_comfy`, `--sage` | leave ComfyUI running for the next run / stop it / start it with SageAttention |
 | `--comfy_root`, `--comfy_url` | override `config.local.json` |
 | `--check`, `--debug` | test the setup / print detailed messages |
+
+### A whole folder of characters
+Point the batch runner at a folder and it builds one splat per photo, one at a time (the GPU is never
+shared), keeping ComfyUI up across the whole batch:
+
+```bash
+python3 batch_to_splat.py --input D:\photos\characters --output_dir D:\splats
+```
+
+Or double-click **`run_batch_to_splat.bat`** and drag the folder in, or drag the folder onto the
+`.bat` file. A single photo works too, so it can replace `run_image_to_splat.bat` entirely.
+
+| Option | Meaning |
+|---|---|
+| `-i`, `--input` | the folder of photos, or one photo |
+| `-o`, `--output_dir` | folder to hold one subfolder per photo (default `output\<photo name>2`) |
+| `--preset`, and every `image_to_splat.py` option | passed through to each run (`--no_orbit`, `--set ...`) |
+| `--recursive`, `--limit N`, `--dry_run` | include subfolders / stop after N photos / just list the plan |
+| `--redo` | do not skip photos that already have a `character.ply` |
+
+Photos that already have a `character.ply` are skipped, so stopping and running the same command
+again carries on where it left off. Ctrl-C stops immediately; to stop after the photo it is on
+instead, put an empty `stop.txt` in the photo folder. Every photo's status and duration goes to
+`batch_summary.json`, and a photo that fails does not stop the others.
 
 ### What you get
 In the output folder:
@@ -160,7 +195,12 @@ In the output folder:
 ### Iterating on quality
 Rerunning a command **only redoes the stages whose inputs or settings changed**. Changing
 `--set ...` retrains in minutes without regenerating views. An interrupted run continues where it
-stopped. See [quality_plan.md](quality_plan.md) for the improvement roadmap.
+stopped. See [quality_plan.md](quality_plan.md) for what was measured, what helped, and what's next.
+
+To compare training settings on one run's views (developer tool; see its docstring):
+```bash
+python3 -m i2g.experiment --run output\<name>\v2 --name my_test --set aniso_weight=0.2
+```
 
 ---
 
@@ -170,9 +210,14 @@ stopped. See [quality_plan.md](quality_plan.md) for the improvement roadmap.
 |---|---|---|---|
 | ComfyUI start (if not running) | 3–8 min | 3–8 min | – |
 | Cut-out + 3D body | 2 min | 2 min | ~5 GB |
-| Generate views | 10 min (7) | 14 min (22) | ~22 GB (ComfyUI offloads) |
+| Generate views | 10 min (7) | 16 min (26) | ~22 GB (ComfyUI offloads) |
 | Measure cameras | 1 min | 3 min | ~5 GB |
-| Train the splat | 4 min | 14 min | 2–3.5 GB |
+| Train the splat (incl. face bake) | 5 min | 17 min | 5–9 GB |
+| Second pass: fit cameras (~8 s per view) + retrain | – | 22 min | 5–9 GB |
+| Orbit video: render depth controls | – | 5 s | ~3 GB |
+| Orbit video: generate (Wan 2.2 Fun-Control, 81 frames per path, seven paths) | – | 6–8 min per path | ~20 GB (ComfyUI) |
+| Orbit video: cut out the frames + retrain (40k steps, ~550 frames) | – | 14 + 40 min | ~18 GB |
+| `--restore` (high preset): SeedVR2 on a 96-frame orbit | – | +12–15 min | ~18 GB (ComfyUI) |
 
 ---
 
@@ -200,16 +245,19 @@ run_image_to_splat.bat     double-click launcher
 image_to_splat.py          the command-line tool
 config.example.json        copy to config.local.json (your ComfyUI location)
 requirements.txt           Python packages (installed by scripts\v2_setup_env.ps1)
+batch_to_splat.py          the same, for a whole folder of photos, one at a time
 i2g\                       the pipeline package (stages, camera maths, training)
-comfy_nodes\i2g_export\    small ComfyUI node, auto-linked into ComfyUI\custom_nodes
+pacgs\                     the orbit-video method: camera rigs, depth controls, Wan generation, scoring
+comfy_nodes\i2g_export\    small ComfyUI nodes, auto-linked into ComfyUI\custom_nodes
 scripts\                   setup, model download, ComfyUI start/stop, status helpers
 input\                     put your photos here (not published)
 output\  logs\  models\    created locally, not published
 docs\                      history of the abandoned 4DAnyone approach
 ```
 
-Documents: [pipeline_breakdown.md](pipeline_breakdown.md) (how it works) ·
-[plan.md](plan.md) (design and status) · [quality_plan.md](quality_plan.md) (what to improve next).
+Documents: [pacgs_explained.md](pacgs_explained.md) (the orbit video pass, in plain English) ·
+[pipeline_breakdown.md](pipeline_breakdown.md) (how it works) · [plan.md](plan.md) (design and status) ·
+[quality_plan.md](quality_plan.md) (what to improve next).
 
 ---
 
@@ -218,9 +266,11 @@ Documents: [pipeline_breakdown.md](pipeline_breakdown.md) (how it works) ·
 - **Static only.** The person is frozen in the photo's pose; there's no rig and no animation.
 - **One person, front-facing, full body.** Loose clothing and complex hair are harder.
 - **The back and sides are AI-generated guesses.** They are plausible, not ground truth.
-- **Known artifacts:** streaks behind the legs at exact side views, and a softer face when you look
-  from well above or below the photo's angle. These are being worked on in
-  [quality_plan.md](quality_plan.md).
+- **The face is the photo's face.** It is baked onto the 3D body model's face, so it holds up to
+  roughly ±45°. Further round, and under the chin, it is stretched. The rest of the head (hair,
+  ears) comes from the generated views.
+- **Known artifacts:** a faint seam where the baked face meets the hair, and softer detail on the
+  back and sides than on the front. See [quality_plan.md](quality_plan.md).
 - **Windows + 24 GB NVIDIA GPU** is the tested setup.
 
 **Please only process photos of people who have agreed to it.**
