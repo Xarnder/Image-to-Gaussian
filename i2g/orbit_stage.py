@@ -26,8 +26,20 @@ tells the video model to remove them (it drew a bun and a strapless top over the
 clip drags every other view with it. `pacgs.dataset.prepare` flags that case as `restyled` and this
 stage drops the clip.
 
-The heavy lifting lives in the `pacgs` package (the research code for this method); this module is the
-product pipeline's wrapper around it.
+The head fix (next-stage-research/docs/headpass_results.md, on by default):
+  coherent_head  the depth videos are rendered from a stand-in whose head is ONE continuous surface
+                 (headpass.headsurf, v4): the second pass's splat carries the face as a plate baked onto the
+                 body model's face, glued onto a skull with a groove across the top of the forehead, and Wan
+                 painted both - a mask edge around the face and a dip in the side profile. Measured on two
+                 subjects: forehead kink 11.0 -> 4.7 mm, the head holds together to 120 deg in true side views,
+                 the face no longer sinks into long hair.
+  head_pass      then a separate head splat, trained on the head close-ups and the photo only (own 30k steps,
+                 a perceptual weight that ramps up late), merged onto the body at the neck with a dithered
+                 5 cm band. A small extra gain on top of coherent_head (identity +0.01-0.04, a little sharper);
+                 ~20 min.
+
+The heavy lifting lives in the `pacgs` and `headpass` packages (the research code for these methods); this
+module is the product pipeline's wrapper around them.
 """
 from __future__ import annotations
 
@@ -35,6 +47,7 @@ import json
 import time
 from pathlib import Path
 
+import numpy as np
 import torch
 from PIL import Image
 
@@ -101,6 +114,88 @@ def splat_config(opts, rigs: list[str]):
     return cfg
 
 
+def _coherent_standin(paths, world: dict, proxy_ply: Path):
+    """(stand-in PLY, head maps) with one continuous head; (proxy_ply, None) if no face is found in the photo."""
+    from headpass.headsurf import build_standin
+    from headpass.metrics import Reference
+    stage = paths.stage_dir("orbit")
+    out = stage / "standin_coherent.ply"
+    try:
+        ref = Reference(paths.work, world)
+    except RuntimeError as exc:
+        log.warning("Head fix skipped (%s): the depth video uses the second pass's splat as it is", exc)
+        return proxy_ply, None
+    stats = build_standin(proxy_ply, world, ref, out, skin_smooth_bins=16.0, close_bins=10,
+                          save_maps=stage / "standin_coherent_maps.npz")
+    (stage / "standin_coherent.json").write_text(json.dumps(stats, indent=1), encoding="utf-8")
+    log.info("Head fix: the depth videos use one continuous head (face, forehead and skull as one surface)")
+    return out, dict(np.load(stage / "standin_coherent_maps.npz"))
+
+
+def _head_pass(paths, opts, world: dict, rigs: list[str], standin_ply: Path, maps: dict, make_bar=None) -> dict:
+    """Train a head splat on the head close-ups + photo, merge it onto the deliverable at the neck, and refresh
+    the previews. The body-only and head-only splats are kept in the stage folder."""
+    import shutil
+
+    from headpass.headtrain import head_records, train_head_core
+    from headpass.merge import merge_params
+
+    from .evaluate import load_ply
+    from .pipeline import export_previews
+    from .splat import export_ply
+    stage = paths.stage_dir("orbit")
+    head_rigs = [r for r in rigs if r.startswith("face")]
+    records = head_records(stage / "data", head_rigs)
+    if len(records) < 20:
+        log.warning("Head pass skipped: only %d head close-up frames", len(records) - 1)
+        return {"skipped": True}
+    cfg = splat_config(opts, rigs)
+    cfg.iterations = opts.head_iterations
+    cfg.perceptual_ramp_to = 0.6
+    cfg.exclude = ""
+    hr = paths.stage_dir("ingest") / "source_hr_rgba.png" if opts.photo_hr else None
+    bar = make_bar(total=cfg.iterations, desc="Training the head", unit="it") if make_bar else NullBar()
+    try:
+        head, report = train_head_core(records, world, cfg, maps, standin_ply, hr, 0.0, stage / "head", bar)
+    finally:
+        bar.close()
+    body_ply = paths.deliverable("character.ply")
+    shutil.copy2(body_ply, stage / "character_body.ply")
+    export_ply(head, stage / "character_head.ply")
+    merged, stats = merge_params(load_ply(body_ply), head, maps)
+    export_ply(merged, body_ply)
+    export_previews(paths, merged, world)
+    _photo_vs_render(paths, world, merged)
+    report["merge"] = stats
+    rj = paths.deliverable("report.json")
+    if rj.exists():
+        full = json.loads(rj.read_text())
+        full["head_pass"] = report
+        rj.write_text(json.dumps(full, indent=1, default=str), encoding="utf-8")
+    log.info("Head pass merged at the neck: %d head + %d body Gaussians", stats["head_kept"], stats["body_kept"])
+    return {"head_gaussians": stats["head_kept"], "head_minutes": report["train_minutes"]}
+
+
+def _photo_vs_render(paths, world: dict, params) -> None:
+    """photo_vs_render.png for the merged splat (the photo and the render side by side at the photo's camera)."""
+    import cv2
+
+    from pacgs.proxy import photo_source
+
+    from .splat import render_rgb
+    src, K = photo_source(paths.work, world, 2.0)
+    rgba = np.asarray(Image.open(src).convert("RGBA")).astype(np.float32)
+    a = rgba[..., 3:] / 255.0
+    gt = (rgba[..., :3] * a + 127.5 * (1 - a)).round().astype(np.uint8)
+    h, w = gt.shape[:2]
+    with torch.no_grad():
+        pred = render_rgb(params, torch.as_tensor(world["photo_w2c"], device="cuda").float(),
+                          torch.as_tensor(K, device="cuda").float(), w, h)
+    pair = np.concatenate([gt, pred], 1)
+    pair = cv2.resize(pair, (pair.shape[1] * 1248 // h, 1248), interpolation=cv2.INTER_AREA)
+    cv2.imwrite(str(paths.deliverable("photo_vs_render.png")), cv2.cvtColor(pair, cv2.COLOR_RGB2BGR))
+
+
 def run_orbit(paths, opts, client, make_bar=None) -> dict:
     from pacgs.dataset import merge, prepare
     from pacgs.generate import GenSettings, generate_arcs
@@ -115,8 +210,8 @@ def run_orbit(paths, opts, client, make_bar=None) -> dict:
         write_stamp(paths, opts, "orbit", {"skipped": True})
         return {"skipped": True}
 
-    proxy_ply = paths.output / "character.ply"
-    if not proxy_ply.exists():
+    proxy_ply = paths.find_deliverable("character.ply")
+    if proxy_ply is None:
         raise PipelineError("the orbit pass needs the splat from the earlier stages",
                             hint="Run without --only_stage orbit, or rerun with --from_stage train.")
     rigs = [r.strip() for r in opts.orbit_rigs.split(",") if r.strip()]
@@ -126,13 +221,17 @@ def run_orbit(paths, opts, client, make_bar=None) -> dict:
                             hint=f"Known rigs: {', '.join(RIGS)}")
     width, height = opts.orbit_size
     cfg = splat_config(opts, rigs)
-    world = _aligned_world(paths, cfg)
+    fitted = paths.stage_dir("refine") / "registration_fitted.json"
+    world = _aligned_world(paths, cfg, json.loads(fitted.read_text()) if opts.refine and fitted.exists() else None)
     stage = paths.stage_dir("orbit")
     t0 = time.perf_counter()
 
+    control_ply, head_maps = proxy_ply, None
+    if opts.coherent_head:
+        control_ply, head_maps = _coherent_standin(paths, world, proxy_ply)
     bar = make_bar(total=len(rigs), desc="Rendering control videos", unit="rig") if make_bar else NullBar()
     try:
-        cams_by_rig = _controls(paths, world, proxy_ply, rigs, width, height, opts.orbit_frames,
+        cams_by_rig = _controls(paths, world, control_ply, rigs, width, height, opts.orbit_frames,
                                 paths.work, bar)
     finally:
         bar.close()
@@ -151,7 +250,9 @@ def run_orbit(paths, opts, client, make_bar=None) -> dict:
         bar.close()
     _free_comfy_for_training(client)
 
-    splat_proxy = make_proxy("splat", world, proxy_ply)
+    # QA: frames against the control they followed, and against the subject's own silhouette (the second pass)
+    control_proxy = make_proxy("splat", world, control_ply)
+    splat_proxy = make_proxy("splat", world, proxy_ply) if control_ply != proxy_ply else control_proxy
     datasets = []
     bar = make_bar(total=sum(len(c) for c in cams_by_rig.values()), desc="Cutting out the person",
                    unit="frame") if make_bar else NullBar()
@@ -159,12 +260,12 @@ def run_orbit(paths, opts, client, make_bar=None) -> dict:
         for rig in rigs:
             data = stage / "data" / rig
             qa = prepare(stage / "gen" / rig, cams_by_rig[rig], data, paths.work, world,
-                         splat_proxy, splat_proxy, holdout_every=opts.orbit_holdout_every, tag=rig_tag(rig))
+                         control_proxy, splat_proxy, holdout_every=opts.orbit_holdout_every, tag=rig_tag(rig))
             datasets.append((rig, data, qa))
             bar.update(len(cams_by_rig[rig]))
     finally:
         bar.close()
-        del splat_proxy
+        del splat_proxy, control_proxy
         torch.cuda.empty_cache()
     # A clip whose matte disagrees with the splat's own silhouette has re-styled the person (different
     # hair, different clothes). One such clip drags every other view towards it, so drop it - unless they
@@ -191,8 +292,12 @@ def run_orbit(paths, opts, client, make_bar=None) -> dict:
 
     _archive_outputs(paths, copy=True)
     result = _train_and_export(paths, opts, cfg, world, records, "orbit", make_bar)
+    if opts.head_pass and head_maps is not None and any(r.startswith("face") for r in rigs):
+        result |= _head_pass(paths, opts, world, rigs, control_ply, head_maps, make_bar)
     write_stamp(paths, opts, "orbit", {"gaussians": result["gaussians"], "psnr": result.pop("psnr"),
-                                       "rigs": rigs, "frames": len(records) - 1, "holdout": holdout})
+                                       "rigs": rigs, "frames": len(records) - 1, "holdout": holdout,
+                                       "coherent_head": head_maps is not None,
+                                       "head_pass": bool(result.get("head_gaussians"))})
     return result
 
 

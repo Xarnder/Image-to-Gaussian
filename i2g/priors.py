@@ -464,7 +464,7 @@ def push_head(world: dict, push_m: float) -> dict:
     """A copy of `world` whose head (mesh and head keypoints) is moved `push_m` back along the photo
     camera's rays: fully within 14 cm of the face centre, fading out by 20 cm (the neck)."""
     from .cameras import camera_center
-    if push_m <= 0:
+    if push_m == 0:
         return world
     center, _, _ = face_frame(world)
     c = camera_center(world["photo_w2c"])
@@ -480,9 +480,82 @@ def push_head(world: dict, push_m: float) -> dict:
     return out
 
 
-def align_face(world: dict, records: list[dict], device) -> tuple[dict, float]:
-    """(world with the head moved to fit the generated views, the push in metres)."""
-    push = face_push(world, records, device)
+def keypoint_head_push(world: dict, records: list[dict], kp2d: dict, margin_m: float = 0.01,
+                       max_m: float = 0.10) -> tuple[float, dict]:
+    """How far (metres, + = away from the photo camera) the scaffold's head must move along the photo's
+    rays to sit where the generated side and diagonal views put it, measured from their keypoints.
+
+    SAM 3D Body reads the head's depth from one frontal photo. For some subjects it puts the head
+    forward of the torso (head poked forward and tipped down): 4-6 cm on two V16 subjects, against
+    0.2-0.9 cm on the test image and Nurse Man. Every face prior, and the orbit pass's head stand-in,
+    puts the photo's face on the scaffold's face. With the side views in training (since the
+    side-view rescue), the real head forms where they see it, and the photo's face became a
+    second, detached face plate in front of it.
+
+    Each head keypoint (nose, eye midpoint, ear midpoint) is slid along its own photo ray, so the photo
+    view does not change. The depth chosen minimises its horizontal reprojection error in every accepted
+    view that can see depth (more than 30 degrees off the front and back). The vertical error is left
+    out: the generated views put the head 1-4 cm higher than the scaffold on every subject (good ones
+    too), and the photo's rays climb toward the head, so it would drag the answer backward (test image:
+    2.2 cm with it, 0.4 cm without). The silhouette measurement this replaces
+    (face_push) was thrown by hair and raised arms: it pushed the test image 2.7 cm.
+
+    Subjects whose head the scaffold already gets right measure 0.2-1.0 cm (second-pass cameras: Nurse
+    Man 0.2, test image 1.0), so the first `margin_m` is treated as measurement bias and only the rest is
+    applied (Minimalist 5.6 -> 4.6 cm). A centimetre left over does no harm: Dark-Jeans showed no plate
+    at 2 cm.
+
+    kp2d: view name ("b_s101") -> SAM 3D Body 2D keypoints in that view's pixels.
+    Returns (push, report)."""
+    from .body import L_EAR, L_EYE, NOSE, R_EAR, R_EYE
+    from .cameras import camera_center
+
+    kp = world["kp3d"]
+    points = {"nose": kp[NOSE], "eyes": (kp[L_EYE] + kp[R_EYE]) / 2, "ears": (kp[L_EAR] + kp[R_EAR]) / 2}
+    c = camera_center(world["photo_w2c"])
+    photo_az = records[0]["azimuth_deg"]
+    views = []
+    for r in records[1:]:
+        name = f"{r['tag']}_s{r['seed']}"
+        if not r.get("accepted") or name not in kp2d:
+            continue
+        if abs(np.sin(np.radians(r["azimuth_deg"] - photo_az))) < 0.5:
+            continue                                  # front and back views do not see depth
+        k = kp2d[name]
+        obs = {"nose": k[NOSE], "eyes": (k[L_EYE] + k[R_EYE]) / 2, "ears": (k[L_EAR] + k[R_EAR]) / 2}
+        views.append((world["K"] @ np.asarray(r["w2c"])[:3], obs))
+    if len(views) < 2:
+        return 0.0, {"views": len(views), "reason": "fewer than two side or diagonal views"}
+    ts = np.arange(-max_m, max_m + 1e-9, 0.002)
+    per_point = {}
+    for name, p0 in points.items():
+        ray = (p0 - c) / np.linalg.norm(p0 - c)
+        cand = p0[None] + ts[:, None] * ray[None]                    # (T, 3)
+        homo = np.c_[cand, np.ones(len(cand))]
+        cost = np.zeros(len(ts))
+        for P, obs in views:
+            x = homo @ P.T
+            # horizontal error only: in a side view that is the depth, while the vertical error carries the
+            # views' systematic head-height offset, and the photo's rays climb toward the head (camera at
+            # chest height), so sliding along them changes height too
+            err = np.abs(x[:, 0] / x[:, 2] - obs[name][0])
+            cost += np.minimum(err, 60.0)                            # one wild keypoint cannot dominate
+        per_point[name] = float(ts[int(np.argmin(cost))])
+    push = float(np.median(list(per_point.values())))
+    report = {"views": len(views), "per_point_cm": {k: round(v * 100, 1) for k, v in per_point.items()},
+              "measured_cm": round(push * 100, 1)}
+    push = float(np.sign(push) * max(0.0, abs(push) - margin_m))
+    report["applied_cm"] = round(push * 100, 1)
+    return push, report
+
+
+def align_face(world: dict, records: list[dict], device, kp2d: dict | None = None) -> tuple[dict, float]:
+    """(world with the head moved to fit the generated views, the push in metres). With `kp2d` (the
+    views' keypoints) the push is measured from them (keypoint_head_push), else from the silhouettes."""
+    if kp2d is not None:
+        push, _ = keypoint_head_push(world, records, kp2d)
+    else:
+        push = face_push(world, records, device)
     return push_head(world, push), push
 
 

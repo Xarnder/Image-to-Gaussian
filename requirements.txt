@@ -22,6 +22,7 @@ imageio-ffmpeg>=0.5,<1
 
 # geometry, keypoints, matting
 opencv-python>=4.10,<5
+pycolmap==4.2.1
 scipy>=1.10,<2
 trimesh>=4,<5
 onnxruntime-gpu>=1.20,<2

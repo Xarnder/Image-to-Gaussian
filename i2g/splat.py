@@ -84,7 +84,8 @@ class SplatConfig:
     face_core_m: float = 0.06          # radius of the face "core" the photo owns (face_weight applies there)
     face_bake: bool = True             # after training, replace the core with the photo on the mesh's face
     face_bake_m: float = 0.085         # radius of the baked patch (hair inside it stays 3D)
-    face_align: bool = True            # move the mesh's head back to fit the views first (priors.align_face)
+    face_align: bool = True            # move the mesh's head to where the views put it first (pipeline._aligned_world)
+    face_align_method: str = "keypoints"   # keypoints: the views' head keypoints; silhouette: the old face_push
     face_depth_weight: float = 1.0     # keep face Gaussians on the body mesh's face surface (per metre)
     face_mesh_init: bool = True        # start the face from the mesh surface instead of the visual hull
     face_shell: bool = True            # keep Gaussians near the face within face_shell_m of the mesh's face
@@ -112,6 +113,11 @@ class SplatConfig:
     video_share: float = 1.0           # share of the non-photo, non-restored steps given to video frames
                                        # when generated views are also present (alone they get all of them)
     video_pose_refine: bool = False    # refine video-frame cameras like generated views (else exact)
+    # CAP4D-style perceptual schedule (headpass): the perceptual weight ramps from perceptual_weight to
+    # perceptual_ramp_to between these fractions of training (0 = off, the default)
+    perceptual_ramp_to: float = 0.0
+    perceptual_ramp_start: float = 0.25
+    perceptual_ramp_end: float = 0.75
 
 
 # --- data -----------------------------------------------------------------------------------------
@@ -389,7 +395,11 @@ def needle_mask(params, ratio: float, min_len_m: float) -> torch.Tensor:
     return (s[:, 0] > min_len_m) & (s[:, 0] > ratio * s[:, 1])
 
 
-def train(views: dict, world: dict, cfg: SplatConfig, bar=None) -> tuple[torch.nn.ParameterDict, dict]:
+def train(views: dict, world: dict, cfg: SplatConfig, bar=None, init=None,
+          extra_loss=None) -> tuple[torch.nn.ParameterDict, dict]:
+    """`init` = (points, colours) replaces the visual hull as the starting point cloud; `extra_loss(params,
+    step)` adds a regulariser (e.g. headpass's surface leash); views["loss_masks"] (optional, per view
+    (H,W,1) or None) excludes pixels from every image loss - neither colour nor alpha is learned there."""
     from pytorch_msssim import SSIM
 
     from .splatkit_vendor import PerceptualLoss
@@ -406,9 +416,14 @@ def train(views: dict, world: dict, cfg: SplatConfig, bar=None) -> tuple[torch.n
     if cfg.interior_margin > 0:
         from .priors import BodyInterior
         interior = BodyInterior(world, device)
-    points, colors, grid = visual_hull(views, world, cfg, return_grid=True)
-    carver = HullCarver(grid, cfg.hull_carve_dilate) if cfg.hull_carve else None
-    log.info("Visual hull: %d surface points to start from", len(points))
+    if init is not None:
+        points, colors = init
+        grid = None
+        log.info("Starting from %d given points", len(points))
+    else:
+        points, colors, grid = visual_hull(views, world, cfg, return_grid=True)
+        log.info("Visual hull: %d surface points to start from", len(points))
+    carver = HullCarver(grid, cfg.hull_carve_dilate) if cfg.hull_carve and grid is not None else None
     if len(points) < 1000:
         raise RuntimeError(f"visual hull has only {len(points)} points: the view mattes or cameras disagree")
     n_face = 0
@@ -474,6 +489,7 @@ def train(views: dict, world: dict, cfg: SplatConfig, bar=None) -> tuple[torch.n
         i = int(torch.multinomial(probs, 1, generator=gen))
         img, mat = views["images"][i], views["alphas"][i]
         cmap, fdepth, fmask = views["color_maps"][i], views["face_depth"][i], views["face_mask"][i]
+        lmask = views["loss_masks"][i] if views.get("loss_masks") else None
         H0, W0 = img.shape[:2]
         d = 2.0 if step < cfg.half_res_until else 1.0
         ms = cfg.multiscale_video if kinds[i] == "video" else cfg.multiscale
@@ -488,6 +504,7 @@ def train(views: dict, world: dict, cfg: SplatConfig, bar=None) -> tuple[torch.n
         if (h, w) != (H0, W0):
             img, mat = _resize(img, h, w), _resize(mat, h, w)
             cmap = _resize(cmap, h, w) if cmap is not None else None
+            lmask = _resize(lmask, h, w) if lmask is not None else None
             if fdepth is not None:
                 fdepth, fmask = _resize(fdepth, h, w, "nearest"), _resize(fmask, h, w, "nearest")
         use_depth = cfg.face_depth_weight > 0 and fdepth is not None
@@ -508,14 +525,22 @@ def train(views: dict, world: dict, cfg: SplatConfig, bar=None) -> tuple[torch.n
         if cmap is not None:
             # scale the colour gradient (not the value) where this view should have little say
             pred = pred * cmap + pred.detach() * (1 - cmap)
+        if lmask is not None:
+            # excluded pixels match their target exactly: no colour, SSIM or perceptual error there
+            pred = pred * lmask + target * (1 - lmask)
 
         l1 = (pred - target).abs().mean()
         pred_n, target_n = pred.permute(2, 0, 1)[None], target.permute(2, 0, 1)[None]
         loss = (1 - cfg.ssim_lambda) * l1 + cfg.ssim_lambda * (1 - ssim(pred_n, target_n))
-        loss = loss + cfg.alpha_weight * alpha_w[i] * (alpha - mat).abs().mean()
+        a_err = (alpha - mat).abs() if lmask is None else (alpha - mat).abs() * lmask
+        loss = loss + cfg.alpha_weight * alpha_w[i] * a_err.mean()
         if perceptual is not None:
             p_pred, p_target = _perceptual_crop(pred_n, target_n, mat, cfg.perceptual_max_px, gen)
-            loss = loss + cfg.perceptual_weight * perceptual(p_pred, p_target)
+            pw = cfg.perceptual_weight
+            if cfg.perceptual_ramp_to > 0:
+                f = (step / cfg.iterations - cfg.perceptual_ramp_start) /                     max(cfg.perceptual_ramp_end - cfg.perceptual_ramp_start, 1e-6)
+                pw = pw + (cfg.perceptual_ramp_to - pw) * min(max(f, 0.0), 1.0)
+            loss = loss + pw * perceptual(p_pred, p_target)
         loss = views["weights"][i] * loss
         if pose_on:
             loss = loss + cfg.pose_reg * (pose_delta[i] ** 2).sum()
@@ -528,6 +553,8 @@ def train(views: dict, world: dict, cfg: SplatConfig, bar=None) -> tuple[torch.n
             loss = loss + cfg.opacity_reg * torch.sigmoid(params["opacities"]).mean()
         if cfg.scale_reg > 0:
             loss = loss + cfg.scale_reg * torch.exp(params["scales"]).mean()
+        if extra_loss is not None:
+            loss = loss + extra_loss(params, step)
         if cfg.aniso_weight > 0:
             s = torch.exp(params["scales"]).sort(dim=1, descending=True).values
             loss = loss + cfg.aniso_weight * F.relu(s[:, 0] / s[:, 1].clamp_min(1e-9) - cfg.aniso_ratio).mean()

@@ -102,6 +102,25 @@ def planned_pairs(preset: str, seeds: int) -> list[tuple[str, int]]:
     return [(v.tag, s) for v in VIEW_PRESETS[preset] for s in seed_values(seeds)]
 
 
+def extra_pairs(out_dir: Path, preset: str, seeds: int) -> set[tuple[str, int]]:
+    """Views generated beyond the preset's seeds (retries for a core angle that had no usable view)."""
+    manifest_path = out_dir / "views.json"
+    if not manifest_path.exists():
+        return set()
+    tags = {v.tag for v in VIEW_PRESETS[preset]}
+    planned = set(planned_pairs(preset, seeds))
+    return {(m["tag"], m["seed"]) for m in json.loads(manifest_path.read_text())
+            if m["tag"] in tags and (m["tag"], m["seed"]) not in planned and Path(m["path"]).exists()}
+
+
+def next_seeds(out_dir: Path, tag: str, count: int) -> list[int]:
+    """The next `count` seeds in the 101, 202, ... sequence that `tag` has no image for yet."""
+    manifest_path = out_dir / "views.json"
+    used = {m["seed"] for m in json.loads(manifest_path.read_text()) if m["tag"] == tag} \
+        if manifest_path.exists() else set()
+    return [s for s in seed_values(len(used) + count + 50) if s not in used][:count]
+
+
 def qwen_angle_workflow(image_name: str, prompt: str, seed: int, width: int, height: int, prefix: str,
                         angles_strength: float = 0.9, steps: int = 4) -> dict:
     return {
@@ -162,7 +181,7 @@ def generate_views(client: ComfyClient, canvas: Path, out_dir: Path, name: str, 
                                      f"i2g/{name}/views/{view.tag}_s{seed}")
             log.debug("queue %s seed %d: %s", view.tag, seed, view.prompt)
             # first job loads ~28 GB of weights from the HDD, so only per-step speed is policed
-            entry = client.run(wf, timeout=1800, max_step_seconds=120)
+            entry = client.run(wf, timeout=1800, max_step_seconds=120, max_first_step_seconds=900)
             files = client.output_files(entry)
             if not files:
                 raise RuntimeError(f"Qwen produced no image for {view.tag} seed {seed}")

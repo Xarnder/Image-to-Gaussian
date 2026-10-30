@@ -369,6 +369,70 @@ generator cannot infer from the start frame. A proxy that lacks hair, clothing o
 merely fail to help there - it actively instructs the model to remove them. Prefer the subject's own
 splat as the stand-in even where it is least reliable, and use a mesh proxy only for ablations.
 
+## 6.6 From the research harness to the product: what did not carry over
+
+After round 5 the product (`image_to_splat.py`, and the GUI that calls it) was set to the winning
+configuration, and the check was that its training settings matched `f14_product7` field for field -
+which they did, all 69. That check was incomplete. `f14_product7` was trained on clips the research
+harness had *generated*, and the product generates its clips under different conditions. Runs through
+the product came out visibly worse: faces set back in side views, and white smears on dark clothing.
+Every model below lives in one world frame (the body stage is deterministic, and the product's and the
+research run's `photo_w2c`, `K`, `target` and face keypoints are identical), so they compare directly.
+
+### The face sat 2-5 cm too far back: the head push
+
+Before the face priors are applied, the product's stage 5 moves the body mesh's head back along the
+photo's camera rays until its face fits inside the Qwen views' silhouettes (`face_align`). That was
+added to the no-orbit pipeline to stop a mesh-pinned face floating in front of the Qwen views' hair. It
+moved the head 1.9-5.0 cm on ten product runs (2.7 cm on the test image). The research harness never
+pushed: it loads the plain body everywhere, and its stand-in `E6_pixbake` predates the option.
+
+With the orbit pass, the push is carried all the way through, because the video repaints the face
+wherever the stand-in's depth puts it:
+
+| Model (test image) | nose tip, cm in front of the body's centre line |
+|---|---|
+| body model's nose keypoint | 12.5 |
+| research stand-in `E6_pixbake` (no push) | 12.7 |
+| research final `f14_product7` | 12.0 |
+| product stage 5 (pushed 2.7 cm) | 10.2 |
+| product stand-in, stage 6 | 10.2 |
+| product final (GUI run) | 9.7 |
+
+In the product's depth control the face sits inside the raised arm's silhouette, Wan paints it there,
+and the trained model's profile is sunk behind the arm - the defect the user reported from side views.
+**Fix:** `face_align` is off whenever the orbit pass runs (`make_splat_config`), and stays on for
+`--no_orbit`, where it still does its original job.
+
+### White smears on dark clothing: the prompt
+
+The research clips were generated with a description of this subject ("...a fitted white tank top,
+dark grey skinny jeans..."); the product sends a generic one ("A person standing completely still in a
+photo studio..."), because it has to work for any photo. From directly above, the crown clip sees her
+hips behind her shoulders: with the description it paints dark jeans, without it white, continuing the
+vest. The body orbits say dark jeans, and the model splits the difference as whitish blotches on the
+seat. On another subject the same clip grew a hand-held bouquet into a large bush. **Open:** the product
+has an `orbit_prompt` option internally but does not expose it; a per-photo description (typed, or from
+a captioning model) is the fix to test.
+
+### The two steep clips had a better stand-in in research
+
+The +35 and crown clips were generated from `f7_faceball30`, a model that had already been through the
+orbit pass - effectively a second round - because the first-pass splat has never seen the head from
+above. The product generates them from its first-pass splat. **Open:** a second round for those two
+rigs only, using the five-rig orbit model as their stand-in, reproduces the condition they were
+validated under.
+
+### What the product also cannot do
+
+In research every clip's contact sheet was looked at, and bad clips were regenerated (the mesh-proxy
+crown clip, the +34 clip's bow). The product has only the automatic `restyled` check, which sees
+outlines, not colours. That is Q20.
+
+**The lesson for the method:** a component validated inside a harness is validated for the harness's
+inputs. The only check that counts for a product change is the product, run end to end, on a photo
+the harness has results for.
+
 ## 7. A negative result: recolouring instead of baking
 
 If the problem with the baked layer is the geometry it adds, an obvious alternative is to add none:

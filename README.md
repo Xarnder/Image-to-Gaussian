@@ -10,14 +10,21 @@ Gaussian splat on all of it. It runs natively on Windows with an RTX 4090 (24 GB
 ```
 photo ─► cut-out (BiRefNet) ─► 3D body (SAM 3D Body) ─► new views (Qwen-Image-Edit-2511 + angles LoRA)
       ─► measure every view's camera (keypoint PnP) ─► train the splat (gsplat)
-      ─► orbit video pass: that splat as a depth video ─► Wan 2.2 Fun-Control repaints it as the person
-      ─► retrain on those frames, whose cameras are exact ─► character.ply
+      ─► orbit video pass: that splat, with its head rebuilt as one surface, as a depth video
+      ─► Wan 2.2 Fun-Control repaints it as the person ─► retrain on those frames, whose cameras are exact
+      ─► head pass: a separate head splat from the head close-ups, merged on at the neck ─► <photo>-character.ply
 ```
 
 The orbit video pass is the newest and largest quality step: it fixes the face at off-angles and cuts
 stray blobs to a tenth. [pacgs_explained.md](pacgs_explained.md) explains it in plain English,
 [next-stage-research/docs/pacgs_results_sprint1.md](next-stage-research/docs/pacgs_results_sprint1.md)
 has the measurements. Skip it with `--no_orbit` for a result in about a third of the time.
+
+The head fix (2026-09-25, on by default) stops the face looking like a pasted-on mask: the depth video used
+to show the face as a plate glued onto a skull with a groove across the forehead, and Wan painted both. Now
+the head is rebuilt as one continuous surface first, and a separate head splat is merged on at the neck.
+[next-stage-research/docs/headpass_results.md](next-stage-research/docs/headpass_results.md) has the
+measurements; `--no-coherent_head` / `--no-head_pass` turn the two parts off.
 
 New to the project? [pipeline_breakdown.md](pipeline_breakdown.md) explains every stage, tool and
 library for beginners, and how to rebuild it from scratch.
@@ -117,15 +124,17 @@ overflow silently spills into system RAM and runs about 20× slower instead of f
 ## Usage
 
 ### Easiest: double-click
-Double-click **`run_image_to_splat.bat`**, drag your photo into the window, press Enter. Or drag
-the photo **onto** the `.bat` file.
+Double-click **`run_splat_gui.bat`** for a browser UI: pick a photo or a folder, set the experiment
+name, and watch a progress bar, per-photo elapsed/ETA, and a live copy of the usual terminal.
+**`run_image_to_splat.bat`** still works for one photo (drag it in, then type an experiment name).
+Results go in `output\<experiment>\`.
 
 ### Command line (VS Code terminal)
 ```bash
 .\.venv-i2g\Scripts\activate
 ```
 ```bash
-python3 image_to_splat.py --input input\your_photo.png --output_dir output\my_splat
+python3 image_to_splat.py --input input\your_photo.png --experiment 3
 ```
 
 Always activate the environment first. On Windows, `python3` outside it is usually just a Microsoft
@@ -133,10 +142,10 @@ Store placeholder.
 
 More examples:
 ```bash
-python3 image_to_splat.py -i input\your_photo.png --preset draft
+python3 image_to_splat.py -i input\your_photo.png -e 3 --preset draft
 ```
 ```bash
-python3 image_to_splat.py -i input\your_photo.png --from_stage train --set iterations=20000
+python3 image_to_splat.py -i input\your_photo.png -e 3 --from_stage train --set iterations=20000
 ```
 ```bash
 python3 image_to_splat.py --help
@@ -145,10 +154,13 @@ python3 image_to_splat.py --help
 | Option | Meaning |
 |---|---|
 | `-i`, `--input` | the photo: one person, front-facing, full body, ideally 1500+ px tall |
-| `-o`, `--output_dir` | where the result goes; created if missing (default `output\<name>\v2\final`) |
-| `-w`, `--working_dir` | intermediate files; created if missing (default `output\<name>\v2`) |
-| `--preset draft\|standard\|high` | about 20 min / 3 h / 3 h 30. standard adds a second pass (cameras fitted to the first splat, true side views) and the orbit video pass on seven camera paths. high adds more angles and seeds, longer training and a SeedVR2 pass |
+| `-e`, `--experiment` | name or number of this experiment. Results go in `output\<experiment>\`. Asked for if omitted |
+| `-o`, `--output_dir` | where the finished files go; created if missing (default `output\<experiment>\<name>\v2\final`) |
+| `-w`, `--working_dir` | intermediate files; created if missing (default `output\<experiment>\<name>\v2`) |
+| `--preset draft\|standard\|high` | about 20 min / 3 h 20 / 3 h 50. standard adds a second pass (cameras fitted to the first splat, true side views) and the orbit video pass on seven camera paths. high adds more angles and seeds, longer training and a SeedVR2 pass |
 | `--orbit` / `--no_orbit` | the orbit video pass (on by default in standard and high); `--no_orbit` gives the older, faster pipeline |
+| `--coherent_head` / `--no-coherent_head` | the head fix: the orbit video's depth shows one continuous head instead of a face plate on the skull (on by default) |
+| `--head_pass` / `--no-head_pass` | after the orbit pass, a separate head splat merged onto the body at the neck (on by default, ~20 min) |
 | `--orbit_rigs 360,face,face_up,face_down,face_high,face_top,helix` | camera paths: `360` body orbit, `face` head close-up, `face_up` / `face_down` the head from above / below, `face_high` / `face_top` steeply above / over the crown, `helix` rising body orbit |
 | `--views`, `--seeds`, `--iterations`, `--fov`, `--no_hr_photo` | fine-tune a preset |
 | `--refine` / `--no-refine` | second pass: fit every view's camera to the first splat, add the views it rescues, retrain |
@@ -164,7 +176,7 @@ Point the batch runner at a folder and it builds one splat per photo, one at a t
 shared), keeping ComfyUI up across the whole batch:
 
 ```bash
-python3 batch_to_splat.py --input D:\photos\characters --output_dir D:\splats
+python3 batch_to_splat.py --input D:\photos\characters --experiment 3
 ```
 
 Or double-click **`run_batch_to_splat.bat`** and drag the folder in, or drag the folder onto the
@@ -173,24 +185,26 @@ Or double-click **`run_batch_to_splat.bat`** and drag the folder in, or drag the
 | Option | Meaning |
 |---|---|
 | `-i`, `--input` | the folder of photos, or one photo |
-| `-o`, `--output_dir` | folder to hold one subfolder per photo (default `output\<photo name>2`) |
+| `-e`, `--experiment` | name or number of this batch; results go in `output\<experiment>\`. Asked for if omitted |
+| `-o`, `--output_dir` | parent folder for experiments (default `output`). Each run is `<output_dir>\<experiment>\<photo>\v2` |
 | `--preset`, and every `image_to_splat.py` option | passed through to each run (`--no_orbit`, `--set ...`) |
 | `--recursive`, `--limit N`, `--dry_run` | include subfolders / stop after N photos / just list the plan |
-| `--redo` | do not skip photos that already have a `character.ply` |
+| `--redo` | do not skip photos that already have a finished splat |
 
-Photos that already have a `character.ply` are skipped, so stopping and running the same command
+Photos that already have a finished splat are skipped, so stopping and running the same command
 again carries on where it left off. Ctrl-C stops immediately; to stop after the photo it is on
 instead, put an empty `stop.txt` in the photo folder. Every photo's status and duration goes to
 `batch_summary.json`, and a photo that fails does not stop the others.
 
 ### What you get
-In the output folder:
-- **`character.ply`**: the splat. Drag it onto **https://superspl.at/editor** to view it. It is
+Each experiment is its own folder, `output\<experiment>\`. Files are named after both the photo and
+the experiment (so `alice.png` in experiment `3` produces `alice-and-3-character.ply`):
+- **`<photo>-and-<experiment>-character.ply`**: the splat. Drag it onto **https://superspl.at/editor** to view it. It is
   Y-up, in metres, feet at y = 0; if a viewer shows it upside down, rotate it 180°.
-- `turntable.mp4`, `preview_8_angles.png`: quick looks.
-- `contact_sheet.png`: the generated views and their measured cameras. Look at this first when
+- `<photo>-and-<experiment>-turntable.mp4`, `<photo>-and-<experiment>-preview_8_angles.png`: quick looks.
+- `<photo>-and-<experiment>-contact_sheet.png`: the generated views and their measured cameras. Look at this first when
   something seems off.
-- `photo_vs_render.png`, `report.json`, `run_summary.json`, plus `history\` (earlier results).
+- matching `-photo_vs_render.png`, `-report.json`, `-run_summary.json`, plus `history\` (earlier results).
 
 ### Iterating on quality
 Rerunning a command **only redoes the stages whose inputs or settings changed**. Changing
@@ -199,7 +213,7 @@ stopped. See [quality_plan.md](quality_plan.md) for what was measured, what help
 
 To compare training settings on one run's views (developer tool; see its docstring):
 ```bash
-python3 -m i2g.experiment --run output\<name>\v2 --name my_test --set aniso_weight=0.2
+python3 -m i2g.experiment --run output\<experiment>\<name>\v2 --name my_test --set aniso_weight=0.2
 ```
 
 ---
@@ -217,6 +231,8 @@ python3 -m i2g.experiment --run output\<name>\v2 --name my_test --set aniso_weig
 | Orbit video: render depth controls | – | 5 s | ~3 GB |
 | Orbit video: generate (Wan 2.2 Fun-Control, 81 frames per path, seven paths) | – | 6–8 min per path | ~20 GB (ComfyUI) |
 | Orbit video: cut out the frames + retrain (40k steps, ~550 frames) | – | 14 + 40 min | ~18 GB |
+| Head fix: rebuild the stand-in's head | – | ~10 s | ~3 GB |
+| Head pass: train the head (30k steps, ~350 frames) + merge at the neck | – | ~20 min | ~10 GB |
 | `--restore` (high preset): SeedVR2 on a 96-frame orbit | – | +12–15 min | ~18 GB (ComfyUI) |
 
 ---
@@ -248,6 +264,7 @@ requirements.txt           Python packages (installed by scripts\v2_setup_env.ps
 batch_to_splat.py          the same, for a whole folder of photos, one at a time
 i2g\                       the pipeline package (stages, camera maths, training)
 pacgs\                     the orbit-video method: camera rigs, depth controls, Wan generation, scoring
+headpass\                  the head fix: coherent head stand-in, head pass, neck merge, head scoring
 comfy_nodes\i2g_export\    small ComfyUI nodes, auto-linked into ComfyUI\custom_nodes
 scripts\                   setup, model download, ComfyUI start/stop, status helpers
 input\                     put your photos here (not published)

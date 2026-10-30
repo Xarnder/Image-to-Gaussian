@@ -21,27 +21,29 @@ import numpy as np
 from .comfy_client import ComfyClient, WatchdogTripped
 from .errors import PipelineError
 from .log import NullBar, get_logger
-from .paths import MODELS_DIR, REPO_ROOT
+from .paths import (MODELS_DIR, OUTPUT_KINDS, REPO_ROOT, deliverable_path, deliverable_stem,
+                    find_deliverable, safe_run_name)
 
 log = get_logger("pipeline")
 
 STAGES = ["ingest", "body", "views", "register", "train", "refine", "orbit"]
 STAGE_TITLES = {"ingest": "Cut out the person", "body": "Fit a 3D body", "views": "Generate views (Qwen)",
-                "register": "Measure view cameras", "train": "Train the Gaussian splat",
+                "register": "Measure view cameras (new candidates for any missing side)",
+                "train": "Train the Gaussian splat",
                 "refine": "Second pass: refit cameras, retrain",
-                "orbit": "Orbit video pass: calibrated turntable video (Wan), retrain"}
+                "orbit": "Orbit video pass: turntable video of a rebuilt head (Wan), retrain, head pass"}
 STAGE_DIRS = {"ingest": "00_ingest", "body": "01_body", "views": "02_views", "register": "03_qa",
               "train": "06_train", "refine": "07_refine", "orbit": "08_orbit"}
 DEPENDS = {"ingest": [], "body": ["ingest"], "views": ["ingest"], "register": ["body", "views"],
            "train": ["register"], "refine": ["train"], "orbit": ["refine"]}
-OUTPUT_FILES = ["character.ply", "turntable.mp4", "preview_8_angles.png", "photo_vs_render.png", "report.json",
-                "contact_sheet.png", "run_summary.json"]
 
 
 @dataclass
 class RunPaths:
     work: Path      # intermediate files for every stage
-    output: Path    # the deliverables (character.ply, turntable.mp4, ...)
+    output: Path    # the deliverables (<photo>-and-<experiment>-character.ply, ...)
+    name: str       # photo stem (or --name)
+    experiment: str = ""  # --experiment; also in the folder path and file names
 
     def stage_dir(self, stage: str) -> Path:
         return self.work / STAGE_DIRS[stage]
@@ -49,6 +51,38 @@ class RunPaths:
     @property
     def logs(self) -> Path:
         return self.work / "logs"
+
+    def deliverable(self, kind: str) -> Path:
+        """Where this run writes a final file: alice-and-exp3-character.ply, ..."""
+        return deliverable_path(self.output, self.name, kind, self.experiment)
+
+    def find_deliverable(self, kind: str) -> Path | None:
+        """Existing final file: the current name, or older names from earlier runs."""
+        return find_deliverable(self.output, self.name, kind, self.experiment)
+
+    def deliverables_on_disk(self, *, include_contact_sheet: bool = True) -> list[Path]:
+        found, seen = [], set()
+        photo = safe_run_name(self.name)
+        stem = deliverable_stem(self.name, self.experiment)
+        for kind in OUTPUT_KINDS:
+            if not include_contact_sheet and kind == "contact_sheet.png":
+                continue
+            for candidate in (self.output / f"{stem}-{kind}", self.output / f"{photo}-{kind}",
+                              self.output / kind):
+                if candidate.exists():
+                    key = candidate.resolve()
+                    if key not in seen:
+                        found.append(candidate)
+                        seen.add(key)
+        return found
+
+    def clear_legacy(self, kind: str) -> None:
+        """Remove older unprefixed / photo-only files once the current name has been written."""
+        dest = self.deliverable(kind)
+        leftovers = [self.output / kind, self.output / f"{safe_run_name(self.name)}-{kind}"]
+        for legacy in leftovers:
+            if dest.exists() and legacy.exists() and dest.resolve() != legacy.resolve():
+                legacy.unlink()
 
     def create(self) -> None:
         for d in [self.work, self.output, self.logs] + [self.stage_dir(s) for s in STAGES]:
@@ -83,6 +117,16 @@ class RunOptions:
     orbit_face_boost: float = 2.0               # training steps per head close-up frame, relative to a body frame
                                                 # (2.0 with three face clips: measured as f6/f7; 3.0 was for one)
     orbit_iterations: int = 40000               # the orbit pass trains longer than the earlier passes (0: as preset)
+    # The head fix (next-stage-research/docs/headpass_results.md), used when the orbit pass runs:
+    coherent_head: bool = True                  # Wan's depth video shows one continuous head (no face plate, no
+                                                # forehead groove) instead of the second pass's splat as it is
+    head_pass: bool = True                      # then a separate head splat, trained on the head close-ups and
+                                                # merged onto the body at the neck
+    head_iterations: int = 30000
+    # every core angle (both sides, the back, the four diagonals) must have a usable view before training;
+    # an angle without one gets new candidates, up to this many rounds (ghost_body_fix.md)
+    require_core_views: bool = True
+    view_retries: int = 5
 
 
 # --- stamps ---------------------------------------------------------------------------------------
@@ -108,10 +152,14 @@ def _settings(opts: RunOptions, stage: str) -> dict:
             s |= {"refine": opts.refine, "restore": opts.restore}
         if stage == "orbit":
             s |= {"orbit": opts.orbit, "rigs": opts.orbit_rigs, "frames": opts.orbit_frames,
-                  "size": list(opts.orbit_size), "seed": opts.orbit_seed, "prompt": opts.orbit_prompt}
+                  "size": list(opts.orbit_size), "seed": opts.orbit_seed, "prompt": opts.orbit_prompt,
+                  "coherent_head": opts.coherent_head, "head_pass": opts.head_pass,
+                  "head_iterations": opts.head_iterations}
     else:
         s = {"ingest": {}, "body": {"vfov_deg": opts.vfov_deg}, "views": {"views": opts.views, "seeds": opts.seeds},
-             "register": {"views": opts.views, "seeds": opts.seeds, "vfov_deg": opts.vfov_deg}}[stage]
+             "register": {"views": opts.views, "seeds": opts.seeds, "vfov_deg": opts.vfov_deg,
+                          # v2: silhouette rescue of side views, front/back flip guard, core-view retries
+                          "method": 2, "require_core_views": opts.require_core_views}}[stage]
     return json.loads(json.dumps(s, sort_keys=True))
 
 
@@ -143,7 +191,7 @@ def stage_status(paths: RunPaths, opts: RunOptions, stage: str) -> tuple[bool, s
         return False, "an earlier stage changed"
     if stamp.get("settings") != _settings(opts, stage):
         return False, "settings changed"
-    if stage in ("train", "refine") and not (paths.output / "character.ply").exists():
+    if stage in ("train", "refine") and paths.find_deliverable("character.ply") is None:
         return False, "output missing"
     return True, "up to date"
 
@@ -281,6 +329,31 @@ def run_body(paths: RunPaths, opts: RunOptions, client: ComfyClient, make_bar=No
     return summary
 
 
+SLOW_GPU_HINT = ("A sampling step took minutes: VRAM spilled into system RAM. Close other GPU apps (browsers, games, "
+                 "other AI tools), set NVIDIA Control Panel > CUDA - Sysmem Fallback Policy > Prefer No Sysmem "
+                 "Fallback, and run again.")
+
+
+def _slow_comfy_error(exc: Exception, client: ComfyClient) -> PipelineError:
+    """A ComfyUI job that crawled or timed out. The usual cause is a second GPU job (another run, a test,
+    a ComfyUI tab) paging model weights out of VRAM and RAM, so name it when there is one."""
+    from .gpu_lock import describe, other_gpu_jobs
+    others = other_gpu_jobs()
+    if others:
+        return PipelineError(f"{exc}. Another Image-to-Gaussian job was using the GPU at the same time: "
+                             f"{describe(others)}",
+                             hint="Only one job can use the GPU at a time. Wait for that one to finish (or stop "
+                                  "it), then Start again without Rebuild; finished stages are kept.")
+    try:
+        foreign = client.busy()
+    except Exception:  # noqa: BLE001
+        foreign = False
+    if foreign:
+        return PipelineError(f"{exc}. ComfyUI was also running other jobs (another app or a ComfyUI tab)",
+                             hint="Let ComfyUI finish or cancel its other jobs, then Start again without Rebuild.")
+    return PipelineError(str(exc), hint=SLOW_GPU_HINT)
+
+
 def run_views(paths: RunPaths, opts: RunOptions, client: ComfyClient, make_bar=None) -> dict:
     from .ingest import CANVAS_H, CANVAS_W
     from .views import VIEW_PRESETS, generate_views, seed_values
@@ -291,11 +364,8 @@ def run_views(paths: RunPaths, opts: RunOptions, client: ComfyClient, make_bar=N
     try:
         manifest = generate_views(client, paths.stage_dir("ingest") / "canvas.png", paths.stage_dir("views"),
                                   opts.name, CANVAS_W, CANVAS_H, views, seeds, bar)
-    except WatchdogTripped as exc:
-        raise PipelineError(str(exc),
-                            hint="A sampling step took minutes: VRAM spilled into system RAM. Close other GPU "
-                                 "apps (browsers, games, other AI tools), set NVIDIA Control Panel > CUDA - "
-                                 "Sysmem Fallback Policy > Prefer No Sysmem Fallback, and run again.") from exc
+    except (WatchdogTripped, TimeoutError) as exc:
+        raise _slow_comfy_error(exc, client) from exc
     finally:
         bar.close()
         client.free()
@@ -305,39 +375,83 @@ def run_views(paths: RunPaths, opts: RunOptions, client: ComfyClient, make_bar=N
 
 
 def run_register(paths: RunPaths, opts: RunOptions, client: ComfyClient, make_bar=None) -> dict:
+    """Register every view, then make sure each core angle (both sides, the back, the four diagonals) has a
+    usable one: for an angle that has none, generate new candidates (new seeds) and register again, up to
+    opts.view_retries rounds. Without side views the splat grows a ghost second body (ghost_body_fix.md),
+    so by default the run stops here rather than train on an incomplete set."""
     from . import body
+    from .ingest import CANVAS_H, CANVAS_W
     from .matting import Matter
-    from .register import register_all
-    from .views import planned_pairs
+    from .register import CORE_VIEWS, core_gaps, register_all
+    from .views import VIEW_PRESETS, extra_pairs, generate_views, next_seeds, planned_pairs
 
-    pairs = set(planned_pairs(opts.views, opts.seeds))
-    bar = make_bar(total=len(pairs), desc="Measuring cameras", unit="view") if make_bar else NullBar()
+    views_dir = paths.stage_dir("views")
+    world = body.load_world(paths.stage_dir("body"))
+    requests = {v.tag: v for v in VIEW_PRESETS[opts.views] if v.source is None}
+    pairs = set(planned_pairs(opts.views, opts.seeds)) | extra_pairs(views_dir, opts.views, opts.seeds)
+
+    def measure(desc: str) -> list[dict]:
+        bar = make_bar(total=len(pairs), desc=desc, unit="view") if make_bar else NullBar()
+        try:
+            return register_all(client, matter, world, paths.as_dict(), opts.name, opts.vfov_deg, pairs, bar)
+        finally:
+            bar.close()
+
     client.free()
     matter = Matter(MODELS_DIR / "birefnet")
     try:
-        records = register_all(client, matter, body.load_world(paths.stage_dir("body")), paths.as_dict(),
-                               opts.name, opts.vfov_deg, pairs, bar)
+        records = measure("Measuring cameras")
+        for attempt in range(1, opts.view_retries + 1):
+            gaps = [tag for tag in core_gaps(records) if tag in requests]
+            if not gaps:
+                break
+            log.warning("No usable view yet for %s: generating %d new candidates for each (retry %d of %d)",
+                        ", ".join(f"{t} ({CORE_VIEWS[t]:.0f} deg)" for t in gaps), opts.seeds, attempt,
+                        opts.view_retries)
+            new = {tag: next_seeds(views_dir, tag, opts.seeds) for tag in gaps}
+            bar = make_bar(total=sum(map(len, new.values())), desc=f"Regenerating views (retry {attempt})",
+                           unit="img") if make_bar else NullBar()
+            try:
+                for tag, seeds in new.items():
+                    generate_views(client, paths.stage_dir("ingest") / "canvas.png", views_dir, opts.name,
+                                   CANVAS_W, CANVAS_H, [requests[tag]], seeds, bar)
+            except (WatchdogTripped, TimeoutError) as exc:
+                raise _slow_comfy_error(exc, client) from exc
+            finally:
+                bar.close()
+                client.free()
+            pairs |= {(tag, s) for tag, seeds in new.items() for s in seeds}
+            records = measure(f"Measuring cameras (retry {attempt})")
     finally:
         matter.close()
-        bar.close()
         client.free()
 
     selected = [r for r in records[1:] if r.get("selected")]
     accepted = [r for r in records[1:] if r.get("accepted")]
     sheet = paths.stage_dir("register") / "contact_sheet.png"
     if sheet.exists():
-        shutil.copy2(sheet, paths.output / "contact_sheet.png")
+        shutil.copy2(sheet, paths.deliverable("contact_sheet.png"))
+        paths.clear_legacy("contact_sheet.png")
     log.info("Cameras: %d of %d views usable, %d selected for training (plus the photo). Contact sheet: %s",
-             len(accepted), len(records) - 1, len(selected), paths.output / "contact_sheet.png")
+             len(accepted), len(records) - 1, len(selected), paths.deliverable("contact_sheet.png"))
+    gaps = core_gaps(records)
+    if gaps:
+        missing = ", ".join(f"{t} ({CORE_VIEWS[t]:.0f} deg)" for t in gaps)
+        if opts.require_core_views:
+            raise PipelineError(f"no usable view for {missing} after {opts.view_retries} rounds of new candidates; "
+                                "training without it gives a ghost second body or a smeared side",
+                                hint="Open contact_sheet.png to see why they were rejected. Rerun with "
+                                     "--view_retries 10 for more attempts, or --no-require_core_views to "
+                                     "train anyway.")
+        log.warning("No usable view for %s; training anyway (--no-require_core_views). Expect a ghost body or "
+                    "smears on that side.", missing)
     if len(selected) < 3:
         raise PipelineError(f"only {len(selected)} generated views are usable; that is too few for a 360° splat",
                             hint="Open contact_sheet.png to see why views were rejected, then rerun with "
                                  "--seeds 3 (more candidates per angle) or --force --from_stage views.")
-    if len(selected) < 7:
-        log.warning("Only %d views selected; expect holes or smears on the missing sides. --seeds 3 gives more "
-                    "candidates.", len(selected))
     write_stamp(paths, opts, "register", {"selected": [f"{r['tag']}_s{r['seed']}" for r in selected],
-                                          "accepted": len(accepted)})
+                                          "accepted": len(accepted), "extra_views": sorted(
+                                              f"{t}_s{s}" for t, s in extra_pairs(views_dir, opts.views, opts.seeds))})
     return {"selected": len(selected), "accepted": len(accepted)}
 
 
@@ -350,6 +464,12 @@ def make_splat_config(opts: RunOptions):
             raise PipelineError(f"unknown training setting '{key}'",
                                 hint="Valid --set keys: " + ", ".join(sorted(valid)))
         setattr(cfg, key, value)
+    # face_align used to be off with the orbit pass: its silhouette measurement pushed the test image's
+    # head 2.7 cm back when the views agreed with the body mesh within 1 cm, and the orbit video repainted
+    # the face sunk behind the raised arm. The keypoint measurement (face_align_method="keypoints") does
+    # not make that mistake (test image 0.2-0.9 cm, so no push), and the orbit pass needs it: with the
+    # side views in training, a head the body mesh put 4-6 cm too far forward left the photo's face as a
+    # detached plate in front of the real head (next-stage-research/docs/ghost_body_fix.md).
     return cfg
 
 
@@ -410,7 +530,8 @@ def _train_and_export(paths: RunPaths, opts: RunOptions, cfg, world: dict, regis
         export_ply(params, paths.stage_dir(stage) / "character_unbaked.ply")   # the bake can be redone from this
         report["face_bake"] = bake_face_into(params, world, paths.stage_dir("ingest") / "source_hr_rgba.png", cfg)
     bar.update(1)
-    export_ply(params, paths.output / "character.ply")
+    export_ply(params, paths.deliverable("character.ply"))
+    paths.clear_legacy("character.ply")
     bar.update(1)
 
     per_view = {}
@@ -426,26 +547,18 @@ def _train_and_export(paths: RunPaths, opts: RunOptions, cfg, world: dict, regis
         if i == 0:
             pair = np.concatenate([gt, pred], 1)
             pair = cv2.resize(pair, (pair.shape[1] * 1248 // vh, 1248), interpolation=cv2.INTER_AREA)
-            cv2.imwrite(str(paths.output / "photo_vs_render.png"), cv2.cvtColor(pair, cv2.COLOR_RGB2BGR))
+            cv2.imwrite(str(paths.deliverable("photo_vs_render.png")), cv2.cvtColor(pair, cv2.COLOR_RGB2BGR))
+            paths.clear_legacy("photo_vs_render.png")
     report["psnr_masked"] = per_view
     bar.update(1)
 
-    K = torch.tensor(world["K"], device="cuda").float()
-    w, h = world["size"]
-    _, _, radius = azimuth_elevation(world["photo_w2c"], world["target"])
-    frames = [render_rgb(params, torch.tensor(orbit_camera(world["target"], radius, az, 5.0), device="cuda").float(),
-                         K, w, h) for az in np.linspace(0, 360, 73)[:-1]]
-    imageio.mimsave(paths.output / "turntable.mp4", frames, fps=24, quality=8, macro_block_size=8)
-    tiles = [frames[j] for j in range(0, 72, 9)]
-    grid = np.concatenate([np.concatenate(tiles[:4], 1), np.concatenate(tiles[4:], 1)], 0)
-    cv2.imwrite(str(paths.output / "preview_8_angles.png"),
-                cv2.cvtColor(cv2.resize(grid, (grid.shape[1] // 2, grid.shape[0] // 2), interpolation=cv2.INTER_AREA),
-                             cv2.COLOR_RGB2BGR))
-    (paths.output / "report.json").write_text(json.dumps(report, indent=1), encoding="utf-8")
+    export_previews(paths, params, world)
+    paths.deliverable("report.json").write_text(json.dumps(report, indent=1), encoding="utf-8")
+    paths.clear_legacy("report.json")
     bar.update(1)
     bar.close()
 
-    ply_mb = (paths.output / "character.ply").stat().st_size / 1024 ** 2
+    ply_mb = paths.deliverable("character.ply").stat().st_size / 1024 ** 2
     log.info("Splat: %s Gaussians (%.0f MB), photo-view PSNR %.1f dB, %.1f min training, peak VRAM %.1f GiB",
              f"{report['clean']['remaining']:,}", ply_mb, per_view[views["names"][0]], report["train_seconds"] / 60,
              report["stages"][0]["peak_allocated_gib"])
@@ -453,6 +566,28 @@ def _train_and_export(paths: RunPaths, opts: RunOptions, cfg, world: dict, regis
     torch.cuda.empty_cache()
     return {"gaussians": report["clean"]["remaining"], "ply_mb": round(ply_mb, 1),
             "train_minutes": round(report["train_seconds"] / 60, 1), "psnr": per_view}
+
+
+def export_previews(paths: RunPaths, params, world: dict) -> None:
+    """turntable.mp4 and preview_8_angles.png of a splat, as the deliverables."""
+    import imageio.v2 as imageio
+    import torch
+
+    from .cameras import azimuth_elevation, orbit_camera
+    from .splat import render_rgb
+    K = torch.tensor(world["K"], device="cuda").float()
+    w, h = world["size"]
+    _, _, radius = azimuth_elevation(world["photo_w2c"], world["target"])
+    frames = [render_rgb(params, torch.tensor(orbit_camera(world["target"], radius, az, 5.0), device="cuda").float(),
+                         K, w, h) for az in np.linspace(0, 360, 73)[:-1]]
+    imageio.mimsave(paths.deliverable("turntable.mp4"), frames, fps=24, quality=8, macro_block_size=8)
+    paths.clear_legacy("turntable.mp4")
+    tiles = [frames[j] for j in range(0, 72, 9)]
+    grid = np.concatenate([np.concatenate(tiles[:4], 1), np.concatenate(tiles[4:], 1)], 0)
+    cv2.imwrite(str(paths.deliverable("preview_8_angles.png")),
+                cv2.cvtColor(cv2.resize(grid, (grid.shape[1] // 2, grid.shape[0] // 2), interpolation=cv2.INTER_AREA),
+                             cv2.COLOR_RGB2BGR))
+    paths.clear_legacy("preview_8_angles.png")
 
 
 def _free_comfy_for_training(client: ComfyClient) -> None:
@@ -465,18 +600,48 @@ def _free_comfy_for_training(client: ComfyClient) -> None:
     client.free()
 
 
-def _aligned_world(paths: RunPaths, cfg) -> dict:
-    """The body scaffold with its head moved back to where the generated views put it (priors.align_face);
-    only the face priors use the head, so this is skipped when they are all off."""
+def _view_keypoints(paths: RunPaths, records: list[dict]) -> dict:
+    """SAM 3D Body's 2D keypoints of every registered view (from the register stage's cache)."""
     from . import body
-    from .priors import align_face
+    cache_path = paths.stage_dir("register") / "sam3d_cache.json"
+    cache = json.loads(cache_path.read_text()) if cache_path.exists() else {}
+    out = {}
+    for r in records[1:]:
+        name = f"{r['tag']}_s{r['seed']}"
+        hits = [v for k, v in cache.items() if k == name or k.startswith(name + "@")]
+        if hits and Path(hits[0]).exists():
+            person = body.load_person(Path(hits[0]))
+            if "kp2d" in person:
+                out[name] = person["kp2d"]
+    return out
+
+
+def _aligned_world(paths: RunPaths, cfg, records: list[dict] | None = None) -> dict:
+    """The body scaffold with its head moved along the photo's rays to where the generated views put it
+    (priors.keypoint_head_push). Everything that places the photo's face in 3D uses this head: the face
+    priors in training, and the orbit pass's head stand-in. `records`: the views with their cameras
+    (default: the register stage's; the second pass and the orbit pass give their fitted, tighter ones)."""
+    from . import body
+    from .priors import face_push, keypoint_head_push, push_head
     world = body.load_world(paths.stage_dir("body"))
-    if not cfg.face_align or not (cfg.face_bake or cfg.face_shell or cfg.face_depth_weight > 0 or cfg.face_mesh_init):
+    if not cfg.face_align:
         return world
-    records = json.loads((paths.stage_dir("register") / "registration.json").read_text())
-    world, push = align_face(world, records, "cuda")
-    log.info("Face: the body mesh's head moved %.1f cm back to fit the generated views' silhouettes", push * 100)
-    return world
+    if records is None:
+        records = json.loads((paths.stage_dir("register") / "registration.json").read_text())
+    if cfg.face_align_method == "silhouette":
+        push = face_push(world, records, "cuda")
+        log.info("Face: the body mesh's head moved %.1f cm back to fit the generated views' silhouettes", push * 100)
+    else:
+        push, report = keypoint_head_push(world, records, _view_keypoints(paths, records))
+        log.info("Face: the generated views put the head %.1f cm %s than the body mesh (from %d side and "
+                 "diagonal views; nose/eyes/ears %s cm); moved it %.1f cm along the photo's rays",
+                 abs(report.get("measured_cm", 0.0)), "further back" if report.get("measured_cm", 0) >= 0
+                 else "further forward", report.get("views", 0), report.get("per_point_cm", {}), push * 100)
+        if abs(push) >= 0.03:
+            log.warning("Face: SAM 3D Body put this head %.0f cm off where the generated views see it; the head "
+                        "was moved to match (without this the photo's face sits in front of the head as a "
+                        "mask).", abs(report["measured_cm"]))
+    return push_head(world, push)
 
 
 def run_train(paths: RunPaths, opts: RunOptions, client: ComfyClient, make_bar=None) -> dict:
@@ -510,7 +675,11 @@ def run_refine(paths: RunPaths, opts: RunOptions, client: ComfyClient, make_bar=
     world = _aligned_world(paths, cfg)
     refine_dir = paths.stage_dir("refine")
     records = json.loads((paths.stage_dir("register") / "registration.json").read_text())
-    params = load_ply(paths.output / "character.ply")
+    ply = paths.find_deliverable("character.ply")
+    if ply is None:
+        raise PipelineError("the second pass needs the splat from the train stage",
+                            hint="Rerun with --from_stage train.")
+    params = load_ply(ply)
     bar = make_bar(total=len(records) - 1, desc="Fitting cameras to the splat", unit="view") if make_bar else NullBar()
     try:
         records = refit_records(params, world, records, bar=bar)
@@ -521,6 +690,7 @@ def run_refine(paths: RunPaths, opts: RunOptions, client: ComfyClient, make_bar=
     kept = [f"{r['tag']}_s{r['seed']}" for r in records[1:] if r.get("selected")]
     log.info("Cameras fitted: %d of %d views usable, %d selected", sum(bool(r.get("accepted")) for r in records[1:]),
              len(records) - 1, len(kept))
+    world = _aligned_world(paths, cfg, records)        # re-measure the head with the fitted cameras
 
     if opts.restore:
         from .restore import orbit_cameras, render_orbit, restore_orbit
@@ -549,13 +719,13 @@ def _archive_outputs(paths: RunPaths, copy: bool = False) -> None:
     """Keep every previous result in output/history/<time>/ before writing new files. With copy, the
     current files also stay in place until overwritten (the second pass: if it is interrupted, the
     first pass's splat is still the result and the train stage stays done)."""
-    existing = [f for f in OUTPUT_FILES if (paths.output / f).exists() and f != "contact_sheet.png"]
+    existing = paths.deliverables_on_disk(include_contact_sheet=False)
     if not existing:
         return
     dest = paths.output / "history" / time.strftime("%Y%m%d-%H%M%S")
     dest.mkdir(parents=True, exist_ok=True)
-    for f in existing:
-        (shutil.copy2 if copy else shutil.move)(str(paths.output / f), str(dest / f))
+    for src in existing:
+        (shutil.copy2 if copy else shutil.move)(str(src), str(dest / src.name))
     log.info("Previous result %s %s", "copied to" if copy else "moved to", dest)
 
 

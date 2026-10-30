@@ -4,22 +4,23 @@ Image-to-Gaussian: one front-facing, full-body photo -> one static 3D Gaussian s
 
 EXAMPLE (VS Code terminal, in D:\Image-to-Gaussian):
     .\.venv-i2g\Scripts\activate
-    python3 image_to_splat.py --input input\front.png --output_dir output\my_splat
+    python3 image_to_splat.py --input input\front.png --experiment 3
 
 MORE EXAMPLES
-    python3 image_to_splat.py -i input\front.png --preset draft          # quick rough result (~20 min)
-    python3 image_to_splat.py -i input\front.png --no_orbit              # skip the orbit video pass (~35 min)
-    python3 image_to_splat.py -i input\front.png --preset high           # every pass (~2 h 30)
-    python3 image_to_splat.py -i input\front.png --from_stage train --set iterations=20000   # retrain only
-    python3 image_to_splat.py -i input\front.png --working_dir D:\splat_work\me --keep_comfy
-    python3 image_to_splat.py --check                                    # test the setup without a run
-    python3 image_to_splat.py --stop_comfy                               # stop a ComfyUI kept by --keep_comfy
-    python3 image_to_splat.py --help                                     # every option
+    python3 image_to_splat.py -i input\front.png -e face-v2 --preset draft
+    python3 image_to_splat.py -i input\front.png -e 3 --no_orbit
+    python3 image_to_splat.py -i input\front.png -e 3 --preset high
+    python3 image_to_splat.py -i input\front.png -e 3 --from_stage train --set iterations=20000
+    python3 image_to_splat.py -i input\front.png -e 3 --working_dir D:\splat_work\me --keep_comfy
+    python3 image_to_splat.py --check
+    python3 image_to_splat.py --stop_comfy
+    python3 image_to_splat.py --help
 
-Or double-click run_image_to_splat.bat, or drag a photo onto it.
+Or double-click run_image_to_splat.bat, or drag a photo onto it (it will ask for an experiment name).
 
-Result: <output_dir>\character.ply. Open it by dragging it onto https://superspl.at/editor
-Also written: turntable.mp4, preview_8_angles.png, contact_sheet.png, photo_vs_render.png, report.json.
+Result: output\<experiment>\<photo>\v2\final\<photo>-and-<experiment>-character.ply
+Also written: matching -turntable.mp4, -preview_8_angles.png, -contact_sheet.png, -photo_vs_render.png,
+-report.json. Open the .ply by dragging it onto https://superspl.at/editor
 Stages rerun only when their inputs or settings change, so iterating on training settings is cheap.
 """
 from __future__ import annotations
@@ -55,7 +56,10 @@ import json  # noqa: E402
 import time  # noqa: E402
 
 sys.path.insert(0, str(REPO_ROOT))
-from i2g.paths import COMFY_ROOT as DEFAULT_COMFY_ROOT, COMFY_URL as DEFAULT_COMFY_URL  # noqa: E402
+from i2g.paths import (  # noqa: E402
+    COMFY_ROOT as DEFAULT_COMFY_ROOT, COMFY_URL as DEFAULT_COMFY_URL, OUTPUT_DIR, existing_experiments,
+    safe_run_name,
+)
 
 # (set comfy_root in config.local.json once; see config.example.json)
 STAGES = ["ingest", "body", "views", "register", "train", "refine", "orbit"]   # same as i2g.pipeline.STAGES
@@ -84,16 +88,23 @@ def build_parser() -> argparse.ArgumentParser:
         description="Turn one front-facing, full-body photo into a static 3D Gaussian splat (.ply).",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="presets: draft = 7 angles x 1 seed, 6k iterations, no orbit video (~20 min); standard = 11 angles "
-               "x 2 seeds, 15k iterations, second pass, orbit video on five camera paths (~2 h 30); high = "
-               "15 angles x 3 seeds, 25k iterations, SeedVR2 pass, same orbit video (~3 h). --no_orbit drops "
-               "the orbit video (back to the older, faster pipeline). First ComfyUI start adds ~5-8 min.")
+               "x 2 seeds, 15k iterations, second pass, orbit video on seven camera paths with the head fix, then "
+               "a head pass (~3 h 20); high = 15 angles x 3 seeds, 25k iterations, SeedVR2 pass, same orbit video "
+               "and head pass (~3 h 50). --no_orbit drops the orbit video (back to the older, faster pipeline); "
+               "--no-head_pass saves ~20 min. First ComfyUI start adds ~5-8 min.")
     io = p.add_argument_group("input and output")
     io.add_argument("-i", "--input", type=Path, help="front-facing full-body photo (png, jpg, webp)")
     io.add_argument("-o", "--output_dir", type=Path,
-                    help="folder for the finished splat; created if missing (default: <working_dir>\\final)")
+                    help="folder for the finished splat; created if missing "
+                         "(default: output\\<experiment>\\<name>\\v2\\final)")
     io.add_argument("-w", "--working_dir", type=Path,
-                    help="folder for intermediate files; created if missing (default: output\\<name>\\v2)")
-    io.add_argument("--name", help="run name used for default folders (default: the photo's file name)")
+                    help="folder for intermediate files; created if missing "
+                         "(default: output\\<experiment>\\<name>\\v2)")
+    io.add_argument("--name", help="run name used for default folders and for prefixing output files "
+                                   "(default: the photo's file name)")
+    io.add_argument("-e", "--experiment",
+                    help="name or number of this experiment; results go under output\\<experiment>\\ "
+                         "and every file is named <photo>-and-<experiment>-character.ply (asked for if omitted)")
 
     q = p.add_argument_group("quality")
     q.add_argument("--preset", choices=PRESETS, default="standard", help="speed/quality preset (default: standard)")
@@ -115,6 +126,24 @@ def build_parser() -> argparse.ArgumentParser:
                                         "(head close-up), face_up / face_down (the head from above / below), "
                                         "face_high / face_top (steeply above / over the crown), "
                                         "helix (rising body orbit) (overrides preset)")
+    q.add_argument("--coherent_head", action=argparse.BooleanOptionalAction, default=True,
+                   help="head fix, on by default: the orbit video's depth shows one continuous head (face, forehead "
+                        "and skull as one surface) instead of a face plate glued onto the skull, which Wan painted as "
+                        "a mask edge and a dip in the side profile (next-stage-research/docs/headpass_results.md). "
+                        "--no-coherent_head goes back to the previous behaviour")
+    q.add_argument("--head_pass", action=argparse.BooleanOptionalAction, default=True,
+                   help="after the orbit pass, train a separate head splat on the head close-ups and merge it onto "
+                        "the body at the neck (on by default, ~20 min; a small gain in identity and sharpness). "
+                        "--no-head_pass skips it")
+    q.add_argument("--require_core_views", action=argparse.BooleanOptionalAction, default=True,
+                   help="on by default: training starts only once both sides, the back and the four diagonals each "
+                        "have a usable generated view; an angle without one gets new candidates (see "
+                        "--view_retries), and the run stops if it still has none. Without side views the splat "
+                        "grows a ghost second body (next-stage-research/docs/ghost_body_fix.md). "
+                        "--no-require_core_views trains anyway")
+    q.add_argument("--view_retries", type=int, default=5,
+                   help="rounds of new candidates for a core angle with no usable view (default 5; each round "
+                        "adds as many images per missing angle as --seeds, ~1-3 min)")
     q.add_argument("--fov", type=float, default=40.0, help="assumed vertical field of view of the photo (degrees)")
     q.add_argument("--set", action="append", default=[], metavar="KEY=VALUE",
                    help="override a training setting from i2g/splat.py SplatConfig, e.g. --set sh_degree=0 "
@@ -144,6 +173,30 @@ def build_parser() -> argparse.ArgumentParser:
                    help="check Python, GPU, ComfyUI and model files, then stop")
     d.add_argument("--debug", action="store_true", help="print detailed messages (always written to the log file)")
     return p
+
+
+def resolve_experiment(value: str | None, *, required: bool, parser: argparse.ArgumentParser) -> str:
+    """Return a safe experiment folder name. Prompt on a TTY if the flag was omitted."""
+    if value:
+        return safe_run_name(value)
+    if not required:
+        return ""
+    if sys.stdin.isatty():
+        print("Experiment name or number (results go under output\\<this>\\):")
+        known = existing_experiments(OUTPUT_DIR)
+        if known:
+            shown = ", ".join(known[:24])
+            print(f"  already there: {shown}{' ...' if len(known) > 24 else ''}")
+        while True:
+            try:
+                raw = input("> ").strip().strip('"')
+            except EOFError:
+                raw = ""
+            if raw:
+                return safe_run_name(raw)
+            print("Please enter a name or number for this experiment.")
+    parser.error("--experiment is required: a name or number for this run "
+                 r"(results go to output\<experiment>\<photo>\v2\)")
 
 
 def fmt_minutes(seconds: float) -> str:
@@ -229,8 +282,10 @@ def main(argv=None) -> int:
         parser.error("--input is required (the front-facing photo), unless you use --check")
 
     input_image = args.input.expanduser().resolve() if args.input else None
-    name = args.name or (input_image.stem if input_image else "setup-check")
-    work = (args.working_dir or REPO_ROOT / "output" / name / "v2").expanduser().resolve()
+    experiment = resolve_experiment(args.experiment, required=not args.check, parser=parser)
+    name = safe_run_name(args.name or (input_image.stem if input_image else "setup-check"))
+    default_work = REPO_ROOT / "output" / experiment / name / "v2" if experiment else REPO_ROOT / "output" / name / "v2"
+    work = (args.working_dir or default_work).expanduser().resolve()
     output = (args.output_dir or work / "final").expanduser().resolve()
 
     # i2g reads these at import time
@@ -245,7 +300,7 @@ def main(argv=None) -> int:
     from i2g.pipeline import STAGES as PIPELINE_STAGES
     assert STAGES == PIPELINE_STAGES, "image_to_splat.STAGES is out of date with i2g.pipeline.STAGES"
 
-    paths = RunPaths(work=work, output=output)
+    paths = RunPaths(work=work, output=output, name=name, experiment=experiment)
     # only create folders once the photo is known to exist (a typo shouldn't leave empty folders behind)
     real_run = not args.check and input_image is not None and input_image.is_file()
     if real_run:
@@ -269,6 +324,7 @@ def main(argv=None) -> int:
     from i2g.errors import PipelineError
     client = ComfyClient(args.comfy_url)
     comfy_proc = None
+    gpu_lock = None
     started = time.perf_counter()
     try:
         splat_overrides = {"iterations": preset["iterations"]}
@@ -281,19 +337,27 @@ def main(argv=None) -> int:
         opts = RunOptions(name=name, input_image=input_image or Path(), vfov_deg=args.fov, views=preset["views"],
                           seeds=preset["seeds"], photo_hr=preset["photo_hr"], splat=splat_overrides,
                           refine=preset["refine"], restore=preset["restore"], orbit=preset["orbit"],
-                          orbit_rigs=preset["orbit_rigs"], orbit_iterations=orbit_iterations)
+                          orbit_rigs=preset["orbit_rigs"], orbit_iterations=orbit_iterations,
+                          coherent_head=args.coherent_head, head_pass=args.head_pass,
+                          require_core_views=args.require_core_views, view_retries=max(0, args.view_retries))
 
         log.info("=" * 78)
         log.info("Image-to-Gaussian   photo: %s", input_image or "(setup check)")
         if not args.check:
+            log.info("  experiment %s", experiment)
             log.info("  preset %s (%s views x %d seeds, %d iterations%s%s%s)", args.preset, opts.views, opts.seeds,
                      splat_overrides["iterations"], "" if opts.photo_hr else ", photo at canvas size",
                      ", second pass" + (" + SeedVR2 orbit" if opts.restore else "") if opts.refine else "",
-                     f", orbit video ({opts.orbit_rigs})" if opts.orbit else "")
+                     f", orbit video ({opts.orbit_rigs})" + (", head fix" if opts.coherent_head else "")
+                     + (" + head pass" if opts.head_pass else "") if opts.orbit else "")
             log.info("  working folder: %s", work)
             log.info("  output folder:  %s", output)
         log.info("  log file:       %s", log_file)
         log.info("=" * 78)
+
+        if real_run:        # one run on the GPU at a time: wait for any other to finish (i2g/gpu_lock.py)
+            from i2g import gpu_lock as gpu_lock_mod
+            gpu_lock = gpu_lock_mod.acquire(f"{name} ({experiment})", log)
 
         log.info("Checking the setup")
         preflight(args, input_image, log)
@@ -345,21 +409,27 @@ def main(argv=None) -> int:
             log.info("%s: done in %s", title, fmt_minutes(timings[stage]))
 
         total = time.perf_counter() - started
-        summary = {"input": str(input_image), "preset": args.preset, "options": opts.__dict__ | {
+        summary = {"input": str(input_image), "experiment": experiment, "preset": args.preset, "options": opts.__dict__ | {
             "input_image": str(opts.input_image)}, "stage_seconds": timings, "results": results,
             "total_seconds": round(total, 1), "log_file": str(log_file), "finished": time.strftime("%Y-%m-%d %H:%M:%S")}
-        (output / "run_summary.json").write_text(json.dumps(summary, indent=1, default=str), encoding="utf-8")
+        paths.deliverable("run_summary.json").write_text(
+            json.dumps(summary, indent=1, default=str), encoding="utf-8")
+        paths.clear_legacy("run_summary.json")
 
-        ply = output / "character.ply"
+        ply = paths.find_deliverable("character.ply")
+        extras = [paths.find_deliverable(k) for k in
+                  ("turntable.mp4", "preview_8_angles.png", "contact_sheet.png", "photo_vs_render.png")]
+        extra_names = ", ".join(p.name for p in extras if p is not None)
         log.info("=" * 78)
-        if ply.exists():
+        if ply is not None:
             log.info("DONE in %s  ->  %s  (%.0f MB)", fmt_minutes(total), ply, ply.stat().st_size / 1024 ** 2)
-            log.info("  also: turntable.mp4, preview_8_angles.png, contact_sheet.png, photo_vs_render.png")
-            log.info("  view it: open https://superspl.at/editor and drag character.ply onto the page")
+            if extra_names:
+                log.info("  also: %s", extra_names)
+            log.info("  view it: open https://superspl.at/editor and drag %s onto the page", ply.name)
             log.info("  iterate: python3 image_to_splat.py -i \"%s\" --from_stage train --set KEY=VALUE",
                      input_image)
         else:
-            log.info("Finished the requested stages in %s (no character.ply yet: run the train stage)",
+            log.info("Finished the requested stages in %s (no splat yet: run the train stage)",
                      fmt_minutes(total))
         log.info("=" * 78)
         return 0
@@ -388,6 +458,8 @@ def main(argv=None) -> int:
             stop_comfy(comfy_proc, client)
         elif comfy_proc is not None:
             log.info("ComfyUI left running at %s (--keep_comfy)", args.comfy_url)
+        if gpu_lock is not None:
+            gpu_lock.release()
 
 
 if __name__ == "__main__":

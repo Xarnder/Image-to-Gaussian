@@ -1,27 +1,10 @@
 @echo off
-rem ===========================================================================================
-rem  Image-to-Gaussian: one front-facing full-body photo in, one 3D Gaussian splat (.ply) out.
-rem
-rem  Three ways to run it:
-rem    1. Double-click this file, drag your photo into the window, press Enter.
-rem    2. Drag your photo onto this file.
-rem    3. From a terminal, with any option of image_to_splat.py, for example:
-rem         run_image_to_splat.bat --input "D:\photos\front.png" --output_dir "D:\splats\me" --preset draft
-rem         run_image_to_splat.bat --input "D:\photos\front.png" --from_stage train --set iterations=20000
-rem         run_image_to_splat.bat --check
-rem         run_image_to_splat.bat --help
-rem
-rem  Result: <output_dir>\character.ply  (default: output\<photo name>\v2\final\)
-rem  View it: drag character.ply onto https://superspl.at/editor
-rem
-rem  The default (standard) preset ends with the orbit video pass: the splat is rendered as a depth
-rem  video along seven camera paths (body orbit, four head close-ups - level, above, below, steeply
-rem  above and over the crown - and a rising body orbit), Wan repaints them as the real person, and the
-rem  splat is retrained on those frames, whose cameras are exact. Best quality we have
-rem  (pacgs_explained.md); ~3 h in total.
-rem  For the older, faster pipeline (~35 min):  run_image_to_splat.bat --input "photo.png" --no_orbit
-rem  For a whole folder of photos, one after another:  run_batch_to_splat.bat
-rem ===========================================================================================
+rem Choose Image edit or a pre-generated 360 MP4 when double-clicking.
+rem Drag a photo or MP4 onto this launcher; MP4s use the video pipeline.
+rem Video requires manual review and approval before reconstruction.
+rem Example: --method video --input "D:\clips\orbit.mp4" --experiment orbit-test --approved-video
+rem Image CLI options remain supported. --method image explicitly selects the existing method.
+rem Video results: output\<experiment>\<video-name>\video\final\character.ply
 setlocal EnableExtensions
 chcp 65001 >nul
 set "PYTHONUTF8=1"
@@ -45,28 +28,15 @@ if errorlevel 1 goto :setup_failed
 if not exist "%PY%" goto :setup_failed
 
 :have_python
-if "%~1"=="" goto :ask
+if "%~1"=="" goto :passthrough
 set "FIRST=%~1"
 if "%FIRST:~0,1%"=="-" goto :passthrough
-rem the first argument is a file (drag-and-drop): use it as --input and pass the rest through
-"%PY%" "%~dp0image_to_splat.py" --input %*
+"%PY%" "%~dp0run_to_splat.py" --input %*
 set "RC=%ERRORLEVEL%"
 goto :end
 
 :passthrough
-"%PY%" "%~dp0image_to_splat.py" %*
-set "RC=%ERRORLEVEL%"
-goto :end
-
-:ask
-echo.
-echo  Image-to-Gaussian: turn one front-facing full-body photo into a 3D Gaussian splat.
-echo  Drag your photo into this window (or type its full path) and press Enter:
-set "IMG="
-set /p "IMG=> "
-if not defined IMG goto :ask
-set "IMG=%IMG:"=%"
-"%PY%" "%~dp0image_to_splat.py" --input "%IMG%"
+"%PY%" "%~dp0run_to_splat.py" %*
 set "RC=%ERRORLEVEL%"
 goto :end
 

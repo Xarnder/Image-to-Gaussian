@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -30,3 +31,65 @@ COMFY_OUTPUT_DIR = COMFY_ROOT / "ComfyUI" / "output"
 MODELS_DIR = REPO_ROOT / "models"
 OUTPUT_DIR = REPO_ROOT / "output"
 LOGS_DIR = REPO_ROOT / "logs"
+
+# Final-folder files are written as <photo>-and-<experiment>-<kind>, e.g. alice-and-exp3-character.ply.
+OUTPUT_KINDS = (
+    "character.ply",
+    "turntable.mp4",
+    "preview_8_angles.png",
+    "photo_vs_render.png",
+    "report.json",
+    "contact_sheet.png",
+    "run_summary.json",
+)
+
+
+def safe_run_name(name: str) -> str:
+    """Photo stem, --name, or --experiment as a Windows-safe folder/file piece."""
+    cleaned = re.sub(r'[<>:"/\\|?*]', "_", name).strip(". ")
+    return cleaned or "photo"
+
+
+def deliverable_stem(run_name: str, experiment: str = "") -> str:
+    """alice + exp3 -> alice-and-exp3; alice alone -> alice."""
+    photo = safe_run_name(run_name)
+    exp = safe_run_name(experiment) if experiment else ""
+    if exp:
+        return f"{photo}-and-{exp}"
+    return photo
+
+
+def deliverable_filename(run_name: str, kind: str, experiment: str = "") -> str:
+    """alice + character.ply + exp3 -> alice-and-exp3-character.ply."""
+    return f"{deliverable_stem(run_name, experiment)}-{kind}"
+
+
+def deliverable_path(output_dir: Path, run_name: str, kind: str, experiment: str = "") -> Path:
+    return output_dir / deliverable_filename(run_name, kind, experiment)
+
+
+def find_deliverable(output_dir: Path, run_name: str, kind: str, experiment: str = "") -> Path | None:
+    """Prefixed file if it exists, else older names from earlier runs."""
+    for candidate in (
+        deliverable_path(output_dir, run_name, kind, experiment),
+        output_dir / f"{safe_run_name(run_name)}-{kind}",
+        output_dir / kind,
+    ):
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def existing_experiments(root: Path | None = None) -> list[str]:
+    """Experiment folders under output/ (skips old per-character folders that contain v2/)."""
+    folder = root or OUTPUT_DIR
+    if not folder.is_dir():
+        return []
+    names = []
+    for p in folder.iterdir():
+        if not p.is_dir() or p.name.startswith("."):
+            continue
+        if (p / "v2").is_dir():
+            continue
+        names.append(p.name)
+    return sorted(names)

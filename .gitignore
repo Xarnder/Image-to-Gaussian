@@ -42,3 +42,5 @@ patches/
 # ---- OS / editor ----
 .DS_Store
 Thumbs.db
+
+existing-research-projects/

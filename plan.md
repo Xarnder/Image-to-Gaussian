@@ -1,5 +1,11 @@
 # Image-to-Gaussian v2: plan
 
+> **2026-10-30: separate video-only pipeline completed.** `video_to_splat.py` takes a
+> manually approved orbit MP4 directly through foreground camera reconstruction and
+> Gaussian training, with no image-edit or generation model. The first MiniMax orbit
+> produced `output/minimax-orbit/final/character.ply` (216,418 Gaussians).
+> See [docs/VIDEO_TO_SPLAT.md](docs/VIDEO_TO_SPLAT.md) for the command and measured results.
+
 **Goal:** one front-facing, full-body photo → one **static** 3D Gaussian splat of that person
 (`output/<name>/final/character.ply`). Not 4D, not animation.
 

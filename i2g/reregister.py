@@ -70,10 +70,11 @@ def refit_records(params: dict, world: dict, records: list[dict], skip: set[str]
                   bar=None) -> list[dict]:
     """Fit every generated view's camera; returns updated copies (old camera kept as w2c_keypoints)."""
     from .log import NullBar
+    from .register import flipped
     bar = bar or NullBar()
     K = world["K"]
     target = world["target"]
-    _, _, radius = azimuth_elevation(world["photo_w2c"], target)
+    photo_az, _, radius = azimuth_elevation(world["photo_w2c"], target)
     out = []
     for rec in records:
         rec = dict(rec)
@@ -93,7 +94,11 @@ def refit_records(params: dict, world: dict, records: list[dict], skip: set[str]
             req = rec["requested_deg"]
             starts["requested"] = orbit_camera(target, radius, req[0], req[1] + photo_el)
         fits = {k: fit_camera(params, w, K, rgb, matte) for k, w in starts.items()}
-        best = min(fits, key=lambda k: fits[k][1])
+        # a back view fits a front camera almost as well (mirrored silhouette), so never take a flipped fit
+        flips = {k: bool(rec.get("requested_deg")) and
+                 flipped(azimuth_elevation(v[0], target)[0], rec["requested_deg"][0], photo_az)
+                 for k, v in fits.items()}
+        best = min([k for k in fits if not flips[k]] or fits, key=lambda k: fits[k][1])
         w2c = fits[best][0]
         iou_before = silhouette_iou(params, np.asarray(rec["w2c"]), K, matte_np)
         iou = silhouette_iou(params, w2c, K, matte_np)
@@ -102,8 +107,9 @@ def refit_records(params: dict, world: dict, records: list[dict], skip: set[str]
         rec.update({"w2c_keypoints": rec["w2c"], "w2c": w2c.tolist(), "azimuth_deg": az, "elevation_deg": el,
                     "radius_m": r, "fit_start": best, "fit_iou": iou, "fit_iou_before": iou_before,
                     "fit_moved_m": moved, "accepted_keypoints": rec.get("accepted")})
-        rec["accepted"] = bool(iou >= MIN_FIT_IOU)
-        rec["reasons"] = [] if rec["accepted"] else [f"fit IoU {iou:.2f}"]
+        rec["accepted"] = bool(iou >= MIN_FIT_IOU) and not flips[best]
+        rec["reasons"] = ([] if iou >= MIN_FIT_IOU else [f"fit IoU {iou:.2f}"]) + \
+            (["front/back flipped"] if flips[best] else [])
         log.info("%-10s %-9s az %6.1f el %5.1f  IoU %.3f -> %.3f  moved %.1f cm  %s", name, best, az, el,
                  iou_before, iou, moved * 100, "OK" if rec["accepted"] else "REJECT")
         out.append(rec)

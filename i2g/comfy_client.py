@@ -121,17 +121,21 @@ class ComfyClient:
             time.sleep(poll)
         raise TimeoutError(f"prompt {prompt_id} did not finish within {timeout} s")
 
-    def run(self, workflow: dict, timeout: float = 3600, max_step_seconds: float | None = None) -> dict:
+    def run(self, workflow: dict, timeout: float = 3600, max_step_seconds: float | None = None,
+            max_first_step_seconds: float | None = None) -> dict:
         """Queue a workflow and block until it finishes; returns its /history entry.
 
         max_step_seconds: interrupt if two consecutive sampler progress events are further apart
         than this (the first step is exempt because it includes model loading).
+        max_first_step_seconds: interrupt if a node (model loading included) runs this long without
+        reporting any step; a first step that takes many minutes means the weights are being paged
+        between VRAM, RAM and the disk, and every later step will be as slow.
         """
         ws = self._open_ws() if max_step_seconds else None
         prompt_id = self.queue(workflow)
         if ws is not None:
             try:
-                self._watch(ws, prompt_id, timeout, max_step_seconds)
+                self._watch(ws, prompt_id, timeout, max_step_seconds, max_first_step_seconds)
             finally:
                 ws.close()
         return self.wait(prompt_id, timeout)
@@ -180,11 +184,12 @@ class ComfyClient:
         ws.settimeout(5)
         return ws
 
-    def _watch(self, ws, prompt_id: str, timeout: float, max_step_seconds: float) -> None:
+    def _watch(self, ws, prompt_id: str, timeout: float, max_step_seconds: float,
+               max_first_step_seconds: float | None = None) -> None:
         import websocket
 
         deadline = time.monotonic() + timeout
-        last_step = None
+        last_step = node_started = None
         while time.monotonic() < deadline:
             try:
                 raw = ws.recv()
@@ -201,6 +206,7 @@ class ComfyClient:
                     last_step = now
                 elif kind == "executing":
                     last_step = None  # a new node starts; don't time its loading as a step
+                    node_started = now
                     if data.get("node") is None and data.get("prompt_id") == prompt_id:
                         return
                 elif kind in ("execution_success", "execution_error", "execution_interrupted"):
@@ -209,6 +215,12 @@ class ComfyClient:
                 self.interrupt()
                 raise WatchdogTripped(
                     f"sampler step took > {max_step_seconds:.0f} s; interrupted (VRAM spill into system RAM?)")
+            if (max_first_step_seconds and last_step is None and node_started is not None
+                    and now - node_started > max_first_step_seconds):
+                self.interrupt()
+                raise WatchdogTripped(
+                    f"model loading / first sampler step took > {max_first_step_seconds / 60:.0f} min; interrupted "
+                    "(VRAM spill into system RAM?)")
 
 
 def _format_error(status: dict) -> str:

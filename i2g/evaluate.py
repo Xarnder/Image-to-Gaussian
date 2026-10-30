@@ -10,7 +10,7 @@ Metrics (all from fixed cameras, so two splats of the same run are directly comp
   * sharpness- Laplacian energy inside the person over an orbit (softness proxy)
 The ArcFace/SCRFD models are the InsightFace buffalo_l ONNX files ComfyUI already has.
 
-    python3 -m i2g.evaluate --run output/test-image/v2 --ply output/test-image/v2/final/character.ply
+    python3 -m i2g.evaluate --run output/exp3/test-image/v2 --ply output/exp3/test-image/v2/final/test-image-and-exp3-character.ply
 """
 from __future__ import annotations
 

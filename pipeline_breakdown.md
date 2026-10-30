@@ -37,8 +37,8 @@ Related documents:
 | | |
 |---|---|
 | **Input** | One photo (png/jpg/webp) of **one person**, **front-facing**, **full body** head to feet |
-| **Output** | `character.ply`: a static 3D Gaussian splat, viewable from any angle (e.g. drag it onto https://superspl.at/editor) |
-| **Also produced** | `turntable.mp4` (360° spin), `preview_8_angles.png`, `contact_sheet.png` (the generated views), `photo_vs_render.png`, `report.json` |
+| **Output** | `<photo>-and-<experiment>-character.ply`: a static 3D Gaussian splat, viewable from any angle (e.g. drag it onto https://superspl.at/editor) |
+| **Also produced** | matching `-turntable.mp4` (360° spin), `-preview_8_angles.png`, `-contact_sheet.png` (the generated views), `-photo_vs_render.png`, `-report.json` |
 | **Not produced** | animation, a rig, a mesh. The person is frozen in the pose from the photo |
 | **Runtime** | ~20 min (draft) to ~50 min (high quality) on an RTX 4090 |
 
@@ -398,15 +398,22 @@ This is the most important stage. For each generated image:
 ### Stage 5: Train the splat
 
 **Code:** [i2g/splat.py](i2g/splat.py), [i2g/priors.py](i2g/priors.py), [i2g/splatkit_vendor.py](i2g/splatkit_vendor.py), [i2g/pipeline.py](i2g/pipeline.py) `run_train()`
-**Output:** `final\character.ply`, `turntable.mp4`, `preview_8_angles.png`, `photo_vs_render.png`, `report.json`
+**Output:** `final\<photo>-and-<experiment>-character.ply`, matching `-turntable.mp4`, `-preview_8_angles.png`, `-photo_vs_render.png`, `-report.json`
 
 **1. Load the selected views.** Each one has its image, matte, intrinsics K, measured camera and a
 weight: photo 1.0, generated 0.6. The photo uses the **full-resolution** crop, with K scaled to match.
 Every view that shows the face also gets a **face mask and face depth**, rendered from the SAM 3D
 body mesh. The mesh's face lines up with the photo's face within a few pixels, but its **depth** comes
-from one frontal photo. So the head is first **moved back along the photo's camera rays** until the
-mesh face fits inside the side views' silhouettes (`face_align`; 2.7 cm on the test image). Without
-this, the face sat in front of the hair like a mask.
+from one frontal photo. So the head is first **moved along the photo's camera rays** to where the side
+and diagonal views' head keypoints put it (`face_align`, `priors.keypoint_head_push`). The first 1 cm
+counts as measurement bias, so the test image and Nurse Man do not move, and Minimalist moves 4.6 cm.
+Without this, a head that SAM 3D Body put too far forward leaves the photo's face as a plate in front of
+the real head (next-stage-research\docs\ghost_body_fix.md, part 2). The second pass and the orbit pass
+re-measure with their fitted cameras.
+
+   The older silhouette measurement (`face_align_method=silhouette`) was confused by hair and raised
+   arms. It pushed the test image 2.7 cm when the true offset is under 1 cm, and the orbit video then
+   repainted the face sunk behind the raised arm, so it used to be off with the orbit pass.
 
 **2. Initialise from the visual hull.**
 - Build a 1.2 cm voxel grid around the scaffold, with margin.
@@ -657,18 +664,20 @@ D:\Image-to-Gaussian\
 ### 8.2 One run's working folder
 
 ```
-output\<name>\v2\
+output\<experiment>\<name>\v2\
 ├─ 00_ingest\   canvas.png  alpha.png  source_hr_rgba.png  ingest.json  stage.json
 ├─ 01_body\     sam3d_photo.npz  body_world.npz  overlay_photo.png  body_summary.json  stage.json
 ├─ 02_views\    <tag>\s<seed>.png ...  views.json  stage.json
 ├─ 03_qa\       masks\  sam3d\  sam3d_cache.json  registration.json  contact_sheet.png  stage.json
 ├─ 06_train\    stage.json
 ├─ 07_refine\   stage.json
-├─ 08_orbit\    controls\<rig>\  start\<rig>.png  gen\<rig>rc0\  data\<rig>\  datall\  stage.json
+├─ 08_orbit\    controls\<rig>\  start\<rig>.png  gen\<rig>\arc0\  data\<rig>\  data\all\  stage.json
 ├─ logs\        run_<time>.log (full DEBUG log)  comfyui_<time>.log
 ├─ _archive\    anything replaced (never deleted)
-└─ final\       character.ply  turntable.mp4  preview_8_angles.png  contact_sheet.png
-                photo_vs_render.png  report.json  run_summary.json  history\<time>\
+└─ final\       <name>-and-<experiment>-character.ply  <name>-and-<experiment>-turntable.mp4
+                <name>-and-<experiment>-preview_8_angles.png  <name>-and-<experiment>-contact_sheet.png
+                <name>-and-<experiment>-photo_vs_render.png  <name>-and-<experiment>-report.json
+                <name>-and-<experiment>-run_summary.json  history\<time>\
 ```
 
 ### 8.3 Key JSON records
