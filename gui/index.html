@@ -198,7 +198,7 @@
       display: flex; flex-direction: column; overflow: visible;
     }
     label { display: block; margin: 8px 0 4px; color: var(--muted); font-size: 12px; }
-    input[type=text], select {
+    input[type=text], input[type=number], select {
       width: 100%; padding: 8px 10px; border-radius: 6px; border: 1px solid var(--line);
       background: #101317; color: var(--text); font: inherit;
     }
@@ -460,11 +460,20 @@
         <p class="folder-path" id="folder-path"></p>
       </div>
       <div class="run-toolbar">
+        <button type="button" id="reset-run">Reset for new project</button>
         <button type="button" id="open-work" disabled title="Opens this character's working folder in File Explorer">Open working folder</button>
         <button type="button" class="stop-after compact" id="stop-after-top" hidden>Stop after this one</button>
         <button type="button" class="danger compact" id="stop-now-top" hidden>Stop now</button>
         <button type="button" class="primary run-mini" id="run-toggle" hidden title="Show the Run panel">Run</button>
       </div>
+    </div>
+    <div id="reset-confirm" hidden style="padding:16px; margin-top:12px; border:1px solid #546174; border-radius:10px; background:#1b222a">
+      <strong>Reset for a new video and project?</strong>
+      <p>Clears the current video, project name, progress, preview and console. Keeps your recipe settings and all saved files.</p>
+      <label for="reset-slider">Slide all the way right, then release to reset</label>
+      <input id="reset-slider" type="range" min="0" max="100" value="0" step="1" style="width:100%; accent-color:#36ce8b" aria-valuetext="Slide to confirm reset">
+      <button type="button" id="reset-cancel">Cancel</button>
+      <span id="reset-error" role="alert"></span>
     </div>
     <div class="stop-banner" id="stop-banner"></div>
     <div class="link-banner" id="link-banner">Lost connection to the GUI server. Trying to reconnect…</div>
@@ -503,9 +512,33 @@
       </div>
       <div class="hint">Browse opens a Windows file dialog. You can also paste a full path.</div>
       <div id="video-options" hidden>
-        <p class="hint">Use an existing 360° orbit. Preview the video here before approving it. The person should stay still as the camera makes a complete turn.</p>
-        <label><input type="checkbox" id="approved-video"> I reviewed this video and approve its 360° orbit for reconstruction.</label>
-        <p class="hint">Uses the proven recipe: alternate frames, 1280 px height, recovered cameras, 15,000 training steps. About 15–20 minutes for a similar clip. No image-edit model.</p>
+        <p class="hint">Use an existing orbit video. Preview it before approving. The person should stay still while the camera moves; the close-up recipe can skip missing rear views.</p>
+        <label><input type="checkbox" id="approved-video"> I reviewed this video and approve it for reconstruction.</label>
+        <label for="video-preset">Video recipe</label>
+        <select id="video-preset">
+          <option value="standard">Full 360 — standard reconstruction</option>
+          <option value="closeup">Close-up: skip missing back — recommended for faces</option>
+          <option value="partial-hull">Partial silhouette hull — comparison method</option>
+        </select>
+        <label for="video-coverage">Camera coverage</label>
+        <select id="video-coverage">
+          <option value="full">Full 360° — require cameras around the entire subject</option>
+          <option value="partial">Front and sides — skip views whose cameras cannot be recovered</option>
+        </select>
+        <p class="hint">Front and sides works with incomplete close-up orbits. The missing back is not reconstructed; the preview stays within recovered views.</p>
+        <label for="video-initialization">Starting geometry</label>
+        <select id="video-initialization">
+          <option value="auto">Automatic — recovered points for partial, silhouettes for full</option>
+          <option value="sparse">Recovered 3D points — cleaner close-up faces</option>
+          <option value="hull">Silhouette hull — original method</option>
+        </select>
+        <label for="video-iterations">Training steps</label>
+        <input id="video-iterations" type="number" min="100" max="100000" value="15000">
+        <label for="video-stride">Use every Nth video frame</label>
+        <input id="video-stride" type="number" min="1" max="30" value="2">
+        <label for="video-height">Maximum frame height (pixels)</label>
+        <input id="video-height" type="number" min="256" max="2160" value="1280">
+        <p class="hint">The close-up recipe uses 7,500 steps and verified camera poses. Missing rear views are skipped, not guessed. Individual settings can override the recipe. No image-edit model is run.</p>
       </div>
       <label for="experiment">Experiment name or number</label>
       <input id="experiment" type="text" placeholder="3  or  face-v2" spellcheck="false">
@@ -1262,7 +1295,7 @@
       const formNoOrbit = $("no_orbit").checked;
       let rows;
       let caption = formPreset;
-      if ((s && s.running && s.mode === "video") || (!(s && s.running) && mode() === "video")) {
+      if ((s && s.mode === "video" && (s.running || s.status === "done")) || (!(s && s.running) && mode() === "video")) {
         rows = s && s.mode === "video" && s.stages && s.stages.length ? s.stages : formStagePlan();
         caption = "360 video";
       } else if (s && !s.running && s.mode === "video") {
@@ -1368,6 +1401,9 @@
       if (!s) return;
       lastStatus = s;
       running = !!s.running;
+      $("reset-run").disabled = running;
+      $("reset-run").title = running ? "Stop the current run before resetting" : "Clear the GUI; saved files are kept";
+      if (running) $("reset-confirm").hidden = true;
       setFormLocked(running);
       $("start").disabled = running;
       const stopAfterOff = !running || s.mode !== "batch" || !!s.stop_mode;
@@ -1432,7 +1468,7 @@
       applyFolderRow(s);
     }
 
-    const FORM_IDS = ["method", "approved-video", "path", "browse", "experiment", "preset", "recursive", "redo", "no_orbit", "debug", "extra"];
+    const FORM_IDS = ["method", "approved-video", "video-preset", "video-coverage", "video-initialization", "video-iterations", "video-stride", "video-height", "path", "browse", "experiment", "preset", "recursive", "redo", "no_orbit", "debug", "extra"];
     function setFormLocked(locked) {
       for (const id of FORM_IDS) {
         const el = $(id);
@@ -1983,6 +2019,17 @@
       applyStages(lastStatus);
       refreshPreview();
     }
+    $("video-preset").addEventListener("change", () => {
+      const presets = {
+        standard: ["full", "hull", 15000],
+        closeup: ["partial", "sparse", 7500],
+        "partial-hull": ["partial", "hull", 7500]
+      };
+      const [coverage, initialization, steps] = presets[$("video-preset").value];
+      $("video-coverage").value = coverage;
+      $("video-initialization").value = initialization;
+      $("video-iterations").value = steps;
+    });
     $("method").addEventListener("change", updateMethod);
     $("path").addEventListener("input", () => { $("approved-video").checked = false; });
 
@@ -2074,6 +2121,12 @@
       const payload = {
         mode: mode(),
         approved_video: $("approved-video").checked,
+        video_preset: $("video-preset").value,
+        coverage: $("video-coverage").value,
+        initialization: $("video-initialization").value,
+        iterations: Number($("video-iterations").value),
+        stride: Number($("video-stride").value),
+        max_height: Number($("video-height").value),
         input: $("path").value.trim(),
         experiment: $("experiment").value.trim(),
         preset: $("preset").value,
@@ -2123,6 +2176,50 @@
     $("stop-now").onclick = () => requestStop("now");
     $("stop-after-top").onclick = () => requestStop("after");
     $("stop-now-top").onclick = () => requestStop("now");
+    function resetForNextVideo(s) {
+      $("reset-confirm").hidden = true;
+      $("reset-slider").value = "0";
+      $("reset-error").textContent = "";
+      $("path").value = "";
+      $("experiment").value = "";
+      $("approved-video").checked = false;
+      ["redo", "no_orbit", "debug", "recursive"].forEach(id => $(id).checked = false);
+      $("extra").value = "";
+      $("error").textContent = "";
+      failDismissedKey = "";
+      consoleEl.replaceChildren();
+      $("method").value = "video";
+      lastStatus = s;
+      updateMethod();
+      showViewerEmpty();
+      runOpenedByUser = true;
+      setRunCollapsed(false);
+      applyStatus(s);
+    }
+    $("reset-run").onclick = () => {
+      $("reset-slider").value = "0";
+      $("reset-error").textContent = "";
+      $("reset-confirm").hidden = false;
+    };
+    $("reset-cancel").onclick = () => {
+      $("reset-confirm").hidden = true;
+      $("reset-slider").value = "0";
+    };
+    $("reset-slider").onchange = async () => {
+      if (Number($("reset-slider").value) < 100) {
+        $("reset-slider").value = "0";
+        return;
+      }
+      $("reset-slider").disabled = true;
+      try {
+        const data = await post("/api/reset", { confirmed: true });
+        if (data.ok) resetForNextVideo(data.state);
+        else $("reset-error").textContent = data.error || "Reset failed. Try again.";
+      } finally {
+        $("reset-slider").disabled = false;
+        $("reset-slider").value = "0";
+      }
+    };
     $("run-toggle").onclick = () => {
       runOpenedByUser = true;
       setRunCollapsed(false);
@@ -2175,6 +2272,7 @@
     $("fail-open-work").onclick = openWorkFolder;
 
     function onEvent(ev) {
+      if (ev.type === "reset") { resetForNextVideo(ev); return; }
       if (ev.type === "log") appendLog(ev.text);
       else if (ev.type === "bar") setBarLine(ev.text);
       else if (ev.type === "done") {

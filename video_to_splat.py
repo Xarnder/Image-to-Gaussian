@@ -107,11 +107,47 @@ def prepare(args, root):
     write_json(root / "prepared.json", rows)
 
 
-def calibrate(root):
+def check_coverage(summary, coverage):
+    if coverage == "partial":
+        if summary["registered"] < 12 or summary["points"] < 1000:
+            raise RuntimeError("Partial reconstruction needs at least 12 cameras and 1,000 sparse points")
+        if 360 - summary["largest_gap_degrees"] < 60:
+            raise RuntimeError("Partial reconstruction needs at least 60 degrees of verified views")
+    else:
+        if summary["registered"] < .9 * summary["total"]:
+            raise RuntimeError(f"Only {summary['registered']}/{summary['total']} frames registered; use partial coverage for a front/side reconstruction")
+        if summary["orbit_span_degrees"] < 300 or summary["largest_gap_degrees"] > 45:
+            raise RuntimeError("Registered cameras do not cover a full orbit; use partial coverage or another video")
+    summary["coverage"] = coverage
+    summary["covered_arc_degrees"] = 360 - summary["largest_gap_degrees"]
+    return summary
+
+
+def preview_angles(summary):
+    if summary.get("coverage") != "partial":
+        return np.linspace(0, 360, 144, endpoint=False)
+    angles = np.sort(np.array(list(summary["frame_azimuth_degrees"].values())) % 360)
+    cut = int(np.argmax(np.diff(np.r_[angles, angles[0]+360])))
+    start = angles[(cut+1) % len(angles)]
+    end = angles[cut]
+    if end < start:
+        end += 360
+    # Sweep the observed arc and return; never traverse the missing rear sector.
+    sweep = np.linspace(start, end, 72)
+    return np.r_[sweep, sweep[::-1]]
+
+
+def calibrate(root, coverage="full"):
     import pycolmap as p
-    if (root / "calibration.json").exists():
-        progress("calibrate", 1., "Using validated camera reconstruction")
-        return
+    for filename in ("calibration.json", "calibration_attempt.json"):
+        cached = root / filename
+        if cached.exists():
+            summary = json.loads(cached.read_text())
+            if Path(summary["model"]).is_dir():
+                check_coverage(summary, coverage)
+                write_json(root / "calibration.json", summary)
+                progress("calibrate", 1., f"Using {summary['registered']} verified cameras ({coverage} coverage)")
+                return
     db = root / "features.db"
     reader = p.ImageReaderOptions(camera_model="SIMPLE_PINHOLE", mask_path=str(root / "sfm_masks"))
     extraction = p.FeatureExtractionOptions(num_threads=12, max_image_size=1600)
@@ -149,12 +185,9 @@ def calibrate(root):
     summary["largest_gap_degrees"] = float(np.diff(np.r_[circular, circular[0]+360]).max())
     summary["frame_azimuth_degrees"] = dict(zip([im.name for im in images], angles.tolist()))
     write_json(root / "calibration_attempt.json", summary)
-    if model.num_reg_images() < .9 * total:
-        raise RuntimeError(f"Only {model.num_reg_images()}/{total} frames registered; refusing an incomplete orbit")
-    if summary["orbit_span_degrees"] < 300 or summary["largest_gap_degrees"] > 45:
-        raise RuntimeError("Registered cameras do not cover a full orbit; inspect calibration_attempt.json")
+    check_coverage(summary, coverage)
     write_json(root / "calibration.json", summary)
-    progress("calibrate", 1., f"Validated {model.num_reg_images()}/{total} cameras and full orbit coverage")
+    progress("calibrate", 1., f"Validated {model.num_reg_images()}/{total} cameras ({coverage} coverage)")
 
 
 def fit(args, root):
@@ -206,8 +239,13 @@ def fit(args, root):
     cfg.exclude = ",".join(holdout)
     views = load_views(records, np.array(records[0]["K"]), cfg, "cuda")
     started = time.perf_counter()
-    # Carve a dense surface from the foreground silhouettes, using recovered cameras.
-    params, stats = train(views, world, cfg, bar=TrainingProgress(cfg.iterations))
+    # Partial orbits initialize from triangulated points instead of an incomplete visual hull.
+    init = None
+    if args.initialization == "sparse":
+        keep = np.all((xyz >= bounds[0]) & (xyz <= bounds[1]), axis=1)
+        init = (torch.tensor(xyz[keep], device="cuda", dtype=torch.float32),
+                torch.tensor(colors[keep], device="cuda", dtype=torch.float32))
+    params, stats = train(views, world, cfg, bar=TrainingProgress(cfg.iterations), init=init)
     progress("export", 0., "Cleaning and exporting the trained splat")
     refined = torch.tensor(stats.pop("refined_w2c"), device="cuda")
     cleaning = clean(params, views, refined, cfg)
@@ -242,7 +280,7 @@ def fit(args, root):
         writer = cv2.VideoWriter(str(final/"turntable_raw.mp4"),cv2.VideoWriter_fourcc(*"mp4v"),24,(w,h))
         if not writer.isOpened():
             raise RuntimeError("Could not open preview encoder")
-        for preview_index, az in enumerate(np.linspace(0,360,144,endpoint=False)):
+        for preview_index, az in enumerate(preview_angles(summary)):
             mat = orbit_camera(target,float(np.median(distances)),float(az),0.)
             rgb = render_rgb(params,torch.tensor(mat,device="cuda",dtype=torch.float32),torch.tensor(K,device="cuda",dtype=torch.float32),w,h)
             writer.write(cv2.cvtColor(rgb,cv2.COLOR_RGB2BGR))
@@ -261,7 +299,8 @@ def fit(args, root):
               "elapsed_seconds": time.perf_counter()-started,
               "peak_allocated_vram_gib": torch.cuda.max_memory_allocated()/1024**3,
               "scale_note": "Monocular scale is arbitrary; normalized to nominal 1.7 m sparse foreground height.",
-              "image_generation": False}
+              "image_generation": False, "initialization": args.initialization,
+              "preview_note": "Observed front/side arc only; rear is unobserved" if args.coverage == "partial" else "Full orbit"}
     write_json(final/"report.json",report)
     progress("export", 1., "PLY and previews written")
     print(f"Finished: {final/'character.ply'}",flush=True)
@@ -275,8 +314,12 @@ def main():
     parser.add_argument("--stride",type=int,default=2)
     parser.add_argument("--max-height",type=int,default=1280)
     parser.add_argument("--iterations",type=int,default=15000)
+    parser.add_argument("--coverage", choices=["full", "partial"], default="full")
+    parser.add_argument("--initialization", choices=["auto", "hull", "sparse"], default="auto")
     parser.add_argument("--stage",choices=["prepare","calibrate","train","all"],default="all")
     args = parser.parse_args()
+    if args.initialization == "auto":
+        args.initialization = "sparse" if args.coverage == "partial" else "hull"
     import importlib.util
     if importlib.util.find_spec("pycolmap") is None:
         parser.error("Video reconstruction requires pycolmap. Install it with .venv-i2g/Scripts/python.exe -m pip install pycolmap==4.2.1")
@@ -299,10 +342,13 @@ def main():
         prepare(args,root)
         if args.stage in ("all","calibrate","train"):
             progress("calibrate", 0., "Recovering cameras from foreground features")
-            calibrate(root)
+            calibrate(root, args.coverage)
         if args.stage in ("all","train"):
-            progress("train", 0., "Building the visual hull and starting training")
+            progress("train", 0., f"Initializing from {args.initialization} and starting training")
             fit(args,root)
+    except Exception:
+        get_logger("video").exception("Video reconstruction failed")
+        raise
     finally:
         lock.release()
 

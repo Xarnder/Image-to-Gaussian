@@ -126,3 +126,93 @@ used the earlier stage-boundary export events.
 `baseline_vs_ui.jpg`, `baseline_vs_ui_heads.jpg`, and `verification.json` retain
 the quality evidence. `tools/verify_video_repeat.py` reproduces the PLY checks and
 paired renders. Dashboard screenshots are in `output/minimax-ui-validation/`.
+
+
+## Close-up videos with a missing back — 2026-10-31
+
+Choose **Camera coverage → Front and sides** in the GUI (restart the app after
+updating). This explicitly accepts a partial reconstruction. It uses only cameras
+that COLMAP recovered, skips unregistered frames, and does not invent rear poses.
+The preview sweeps the recovered arc and returns instead of passing through the
+unobserved back. The exported PLY is a partial bust, not a complete head.
+
+The equivalent CLI option is `--coverage partial`, supported by both
+`video_to_splat.py` and `run_to_splat.py`. Full coverage remains the default and
+retains its 90% registration / 45-degree maximum-gap checks. Partial mode requires
+at least 12 recovered cameras, 1,000 sparse points and a 60-degree observed arc.
+Cached failed calibration attempts can be reused; the requested coverage policy
+is rechecked even when a successful calibration file exists. Input hashes and
+approval checks are unchanged.
+
+Partial mode defaults to sparse-point initialization; full mode retains visual-hull
+initialization. For experiments, `video_to_splat.py --initialization hull|sparse`
+overrides that choice. Sparse initialization uses COLMAP geometry and colours;
+all training and silhouette losses still use only the registered frames. Camera
+calibration (and sparse initialization) sees held-out images, so held-out scores
+measure splat fitting/generalization, not an independent camera-calibration test.
+
+### Experiment: MiniMax_H3_360_Orbit_00019_.mp4
+
+The supplied close-up registered 46/62 frames with 13,872 sparse points, 0.683 px
+reprojection error and a 138.77-degree rear gap. The usable arc is 221.23 degrees.
+Two 2,500-step experiments used the same recovered cameras and held-out frames:
+
+| Initialization | Held-out foreground PSNR | Exported Gaussians |
+|---|---:|---:|
+| Visual hull | 26.61 dB | 379,191 |
+| Recovered sparse points | 31.21 dB | 300,784 |
+
+The sparse result has substantially fewer cheek/hair artifacts in the profile
+comparisons. Results are preserved in `output/closeup-partial-hull-2500/` and
+`output/closeup-partial-sparse-2500/`. The longer selected run is stored separately
+in `output/closeup-partial-final/`; its `final/report.json` records final metrics.
+Python failures now write their tracebacks to `run.log` as well as the console.
+
+The selected 7,500-step sparse run completed in 471.5 seconds (including evaluation
+and previews), using 3.99 GiB peak allocated VRAM. Held-out foreground PSNR reached
+**32.12 dB**. `output/closeup-partial-final/final/character.ply` contains **574,044
+Gaussians**. Reloading the PLY produced finite parameters matching the checkpoint
+exactly; eight front/side source-versus-PLY views were rendered and inspected in
+`verified_comparison.jpg`. The partial sweep preview contains 144 frames. Fine hair
+edges remain imperfect, and the unregistered rear sector is not a verified surface.
+All 11 partial-coverage and existing video integration regression tests pass.
+
+
+## Launcher and GUI recipes
+
+Both `run_image_to_splat.bat` and `run_batch_to_splat.bat` now offer a video recipe
+menu when launched interactively (including dropping an MP4 on the launcher):
+
+1. Full 360: full coverage, silhouette hull, 15,000 steps.
+2. Close-up / skip missing back: partial coverage, recovered sparse points, 7,500 steps.
+3. Partial silhouette hull: partial coverage, hull initialization, 7,500 steps.
+
+The GUI exposes the same three recipes plus individual controls for camera
+coverage, starting geometry (automatic, recovered points, silhouette hull),
+training steps, frame stride and maximum height. Selecting a recipe fills its
+coverage, geometry and step defaults; explicit field edits take precedence.
+No option invents cameras for missing views.
+
+For scripted batch launches:
+
+```powershell
+run_image_to_splat.bat --method video --video-preset closeup --input "D:\clips\head.mp4" --experiment head-test --approved-video
+```
+
+Optional overrides: `--coverage full|partial`, `--initialization auto|sparse|hull`,
+`--iterations 2500`, `--stride 2`, `--max-height 1280`. Fully specified commands
+run without the interactive recipe prompt. Existing image routing is unchanged.
+Restart an already-running GUI server after updating the Python files.
+
+
+GUI verification: the close-up preset was selected in the browser, its 7,500-step
+default verified, and a 2,500-step override launched via Start. Using the existing
+verified frames/calibration, all four GUI stages completed and the UI showed 100%
+and Finished. The output report confirms partial coverage, sparse initialization
+and 2,500 steps; held-out PSNR is 31.25 dB. Artifacts are under
+`output/closeup-gui-options-test/MiniMax_H3_360_Orbit_00019_/video/final/`.
+Switching all three recipes was checked in the browser. Both real BAT launchers
+expose the flags through their video help; all 13 routing/coverage/menu tests pass.
+
+### Reset for another video/project
+Click Reset for new project, then slide fully right and release. Cancel or an incomplete slide preserves the form. Reset clears video, project, approval, preview, console and progress while retaining recipe settings and all saved files. Active runs cannot be reset. Browser checks and all 16 regression tests passed.

@@ -1289,6 +1289,24 @@ def pump_output(proc: subprocess.Popen) -> None:
         STATE.emit({"type": "log", "text": f"[gui] reader error: {exc}"})
 
 
+def reset_run(body: dict) -> dict:
+    if body.get("confirmed") is not True:
+        return {"ok": False, "error": "Slide to confirm reset."}
+    with STATE.lock:
+        if STATE.running or (STATE.proc is not None and STATE.proc.poll() is None):
+            return {"ok": False, "error": "Stop the current run before resetting."}
+        fresh = RunState()
+        for key, value in vars(fresh).items():
+            if key not in ("lock", "subscribers"):
+                setattr(STATE, key, value)
+        STATE.mode = "video"
+        STATE.reset_stages()
+        STATE.message = "Ready for a new video and project. Saved files are unchanged."
+    snapshot = STATE.snapshot()
+    STATE.emit({"type": "reset", **snapshot})
+    return {"ok": True, "state": snapshot}
+
+
 def start_run(body: dict) -> dict:
     with STATE.lock:
         if STATE.running:
@@ -1793,6 +1811,10 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/api/preview":
             self._json(200, preview(str(body.get("input") or ""), bool(body.get("recursive")), str(body.get("mode") or "")))
+            return
+        if path == "/api/reset":
+            result = reset_run(body)
+            self._json(200 if result.get("ok") else 409, result)
             return
         if path == "/api/run":
             try:

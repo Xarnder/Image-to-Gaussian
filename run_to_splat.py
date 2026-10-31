@@ -5,7 +5,7 @@ import subprocess
 import sys
 from pathlib import Path
 from i2g.paths import REPO_ROOT
-from i2g.video_options import video_command
+from i2g.video_options import VIDEO_PRESETS, video_command
 
 
 def main(argv=None):
@@ -31,16 +31,24 @@ def main(argv=None):
     vp.add_argument("--input", required=True)
     vp.add_argument("--experiment")
     vp.add_argument("--approved-video", action="store_true")
-    vp.add_argument("--iterations", type=int, default=15000)
+    vp.add_argument("--coverage", choices=["full", "partial"], default="full")
+    vp.add_argument("--video-preset", choices=list(VIDEO_PRESETS))
+    vp.add_argument("--initialization", choices=["auto", "sparse", "hull"])
+    vp.add_argument("--iterations", type=int)
     vp.add_argument("--stride", type=int, default=2)
     vp.add_argument("--max-height", type=int, default=1280)
     args = vp.parse_args(rest)
+    if args.video_preset is None and sys.stdin.isatty() and (not args.experiment or not args.approved_video):
+        print("Video recipe:\n  1. Full 360 - silhouette hull, 15,000 steps\n  2. Close-up: skip missing back - recovered 3D points, 7,500 steps (recommended for faces)\n  3. Partial silhouette hull - comparison method, 7,500 steps")
+        choice = input("Recipe [1/2/3, default 1]: ").strip() or "1"
+        if choice not in ("1", "2", "3"): vp.error("Choose 1, 2 or 3")
+        args.video_preset = {"1": "standard", "2": "closeup", "3": "partial-hull"}[choice]
     if not args.experiment:
         if not sys.stdin.isatty(): vp.error("--experiment is required")
         args.experiment = input("Experiment name or number: ").strip()
     if not args.approved_video:
         if sys.stdin.isatty():
-            print("Review the complete video: the person should stay still while the camera makes a full turn.")
+            print("Review the complete video: the person should stay still while the camera moves. Partial mode may omit the back.")
             args.approved_video = input("Have you reviewed and approved this video? [y/N]: ").strip().lower() == "y"
     try:
         cmd = video_command(sys.executable, vars(args))

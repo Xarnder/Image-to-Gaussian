@@ -1,6 +1,9 @@
 @echo off
 rem Choose Image edit or a pre-generated 360 MP4 when double-clicking.
 rem Drag a photo or MP4 onto this launcher; MP4s use the video pipeline.
+rem Video prompts offer Full 360, Close-up (skip missing back), or Partial silhouette hull.
+rem Close-up CLI: --method video --video-preset closeup --input "D:\clips\head.mp4" --experiment head-test --approved-video
+rem Overrides: --coverage partial --initialization sparse --iterations 7500 --stride 2 --max-height 1280
 rem Video requires manual review and approval before reconstruction.
 rem Example: --method video --input "D:\clips\orbit.mp4" --experiment orbit-test --approved-video
 rem Image CLI options remain supported. --method image explicitly selects the existing method.
