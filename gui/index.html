@@ -109,11 +109,16 @@
       grid-template-rows: auto auto;
       grid-template-areas:
         "run stages"
+        "candidates candidates"
         "preview console";
       align-items: stretch;
       gap: 16px; padding: 0 20px 32px;
     }
     .controls { grid-area: run; overflow: visible; }
+    #candidates-wrap, #generated-batch-results { grid-area: candidates; }
+    #generated-batch-results[hidden] { display: none; }
+    #candidate-gallery article { padding:12px; border:1px solid var(--line); border-radius:10px; min-width:0; }
+    #candidate-gallery article.selected { border-color:var(--accent); }
     #viewer-wrap { grid-area: preview; min-height: 720px; }
     #stage-wrap { grid-area: stages; overflow: visible; min-width: 0; }
     #console-wrap { grid-area: console; min-height: 0;
@@ -123,6 +128,7 @@
       grid-template-rows: auto auto;
       grid-template-areas:
         "preview stages"
+        "candidates candidates"
         "console console";
     }
     body.run-collapsed .controls { display: none; }
@@ -131,12 +137,14 @@
       grid-template-rows: auto auto;
       grid-template-areas:
         "run stages"
+        "candidates candidates"
         "preview preview";
     }
     body.run-collapsed.console-collapsed main {
       grid-template-columns: minmax(420px, 1.2fr) minmax(340px, 0.9fr);
       grid-template-areas:
-        "preview stages";
+        "preview stages"
+        "candidates candidates";
     }
     body.console-collapsed #console { display: none; }
     body.console-collapsed #console-wrap { min-height: 0; }
@@ -149,6 +157,7 @@
       grid-template-areas: "console";
     }
     body.console-full .controls,
+    body.console-full #candidates-wrap,
     body.console-full #viewer-wrap,
     body.console-full #stage-wrap { display: none; }
     body.console-full #console-wrap { min-height: 0; height: 100%; align-self: stretch; }
@@ -166,6 +175,7 @@
         grid-template-rows: none;
         grid-template-areas:
           "run"
+          "candidates"
           "preview"
           "stages"
           "console";
@@ -177,12 +187,14 @@
         grid-template-rows: none;
         grid-template-areas:
           "preview"
+          "candidates"
           "stages"
           "console";
       }
       body:not(.run-collapsed).console-collapsed main {
         grid-template-areas:
           "run"
+          "candidates"
           "preview"
           "stages"
           "console";
@@ -198,7 +210,7 @@
       display: flex; flex-direction: column; overflow: visible;
     }
     label { display: block; margin: 8px 0 4px; color: var(--muted); font-size: 12px; }
-    input[type=text], input[type=number], select {
+    input[type=text], input[type=number], select, #custom-prompt {
       width: 100%; padding: 8px 10px; border-radius: 6px; border: 1px solid var(--line);
       background: #101317; color: var(--text); font: inherit;
     }
@@ -224,6 +236,9 @@
     .help:hover .tip, .help:focus .tip, .help:focus-within .tip { display: block; }
     .modes { display: flex; gap: 12px; margin-bottom: 8px; }
     #image-modes[hidden], #image-options[hidden], #video-options[hidden] { display: none !important; }
+    #generation-options[hidden], #candidates-wrap[hidden], #existing-video-approval[hidden],
+    #existing-video-hint[hidden], #candidate-count[hidden], #candidate-count-label[hidden],
+    #generation-stop[hidden] { display: none !important; }
     button {
       border: 0; border-radius: 6px; padding: 8px 12px; font: inherit; font-weight: 600; cursor: pointer;
       background: #2a323b; color: var(--text);
@@ -418,12 +433,26 @@
     .ok { color: var(--accent); }
     .fail { color: var(--bad); }
     .stop { color: var(--warn); }
-  </style>
+  
+    .batch-table-scroll {overflow-x:auto; margin-top:16px}
+    .batch-results-table {width:100%;border-collapse:collapse;text-align:left;font-size:14px}
+    .batch-results-table th {font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);padding:12px;border-bottom:2px solid #555}
+    .batch-results-table td {padding:14px 12px;border-bottom:1px solid #5555;vertical-align:top}
+    .batch-results-table td:first-child {min-width:190px;overflow-wrap:anywhere;max-width:320px}
+    .batch-results-table td:nth-child(n+4) {white-space:nowrap}
+    .batch-results-table button {padding:6px 9px;margin:0 5px 6px 0;font-size:12px}
+    .batch-status {display:inline-block;border-radius:20px;padding:4px 10px;font-weight:600;background:#414955;color:#fff;white-space:nowrap}
+    .batch-status.done,.batch-status.skipped {background:#164e37;color:#bcf7d5}
+    .batch-status.running {background:#184c78;color:#d0ebff}
+    .batch-status.failed {background:#702c32;color:#ffe1e4}
+    .batch-status.stopped {background:#624820;color:#ffe6b0}
+    .batch-note {display:block;max-width:280px;font-size:12px;margin-top:6px;overflow-wrap:anywhere}
+    </style>
 </head>
 <body>
   <header>
     <h1>Image-to-Gaussian</h1>
-    <div class="sub">Runs the same pipeline as the .bat files, with a live console.</div>
+    <div class="sub">From one photo or an approved orbit video to a static Gaussian splat.</div>
   </header>
   <div class="progress-wrap">
     <div class="prog">
@@ -462,11 +491,14 @@
       <div class="run-toolbar">
         <button type="button" id="reset-run">Reset for new project</button>
         <button type="button" id="open-work" disabled title="Opens this character's working folder in File Explorer">Open working folder</button>
+        <button type="button" id="open-ply" hidden>Show final PLY in Explorer</button>
         <button type="button" class="stop-after compact" id="stop-after-top" hidden>Stop after this one</button>
         <button type="button" class="danger compact" id="stop-now-top" hidden>Stop now</button>
         <button type="button" class="primary run-mini" id="run-toggle" hidden title="Show the Run panel">Run</button>
       </div>
     </div>
+    <p id="folder-feedback" role="status" aria-live="polite"></p>
+    <p id="coverage-note" role="status" hidden></p>
     <div id="reset-confirm" hidden style="padding:16px; margin-top:12px; border:1px solid #546174; border-radius:10px; background:#1b222a">
       <strong>Reset for a new video and project?</strong>
       <p>Clears the current video, project name, progress, preview and console. Keeps your recipe settings and all saved files.</p>
@@ -498,6 +530,7 @@
       </div>
       <label for="method">Reconstruction method</label>
       <select id="method">
+        <option value="generate" selected>Front image → 360 video → Gaussian splat</option>
         <option value="image">Image edit — generate views from a photo</option>
         <option value="video">360 video — reconstruct a pre-generated MP4</option>
       </select>
@@ -507,38 +540,62 @@
       </div>
       <label for="path" id="path-label">Photo or folder</label>
       <div class="row">
-        <input id="path" type="text" placeholder="D:\photos\alice.png  or  D:\photos\characters" spellcheck="false">
+        <input id="path" type="text" placeholder="D:\photos\front-facing.png" spellcheck="false">
         <button type="button" id="browse">Browse</button>
       </div>
       <div class="hint">Browse opens a Windows file dialog. You can also paste a full path.</div>
+      <div id="generation-options">
+        <label><input type="checkbox" id="custom-prompt-enabled"> Custom MiniMax H3 prompt</label>
+        <div id="custom-prompt-editor" hidden>
+          <label for="custom-prompt">MiniMax H3 prompt</label>
+          <textarea id="custom-prompt" rows="12" maxlength="32000" spellcheck="true" style="width:100%;box-sizing:border-box;resize:vertical" placeholder="Loading the current workflow prompt…"></textarea>
+          <button type="button" id="restore-default-prompt">Restore working prompt</button>
+          <p class="hint">Starts with the exact working 360° prompt. Edit scene, framing or pose details as needed. Applies to every candidate and every image in a folder batch. Turning this off uses the original workflow prompt.</p>
+        </div>
+        <label for="generation-source">Image input</label>
+        <select id="generation-source">
+          <option value="single">One front-facing image</option>
+          <option value="folder">Folder of front-facing images — automated batch</option>
+        </select>
+        <p id="generation-batch-hint" class="hint" hidden>Each image gets one video and its own Gaussian splat, without review. Requires automatic first-video selection or exactly one candidate. Drag the image list to choose processing order. Finished splats are skipped; failed images are recorded and the batch continues.</p>
+        <div id="generation-batch-options" hidden>
+          <label><input type="checkbox" id="generation-recursive"> Include subfolders</label>
+          <label><input type="checkbox" id="generation-redo"> Rebuild finished ones</label>
+          <label><input type="checkbox" id="generation-combined-ply" checked> Collect final PLY files in one batch folder</label>
+          <button type="button" onclick="post('/api/open_folder', {experiment:$('experiment').value,name:'batch',where:'combined'}).then(r=>{if(!r.ok)alert(r.error)})">Open combined PLY folder</button>
+          <p class="hint">Stores the real files in output / experiment / final_ply, with Explorer shortcuts in each project's final folder. Turn off to keep separate project PLY files.</p>
+          <p class="hint">Start again to continue a stopped batch or retry failures. Rebuild preserves previous results in an archive folder.</p>
+        </div>
+        <p class="hint">MiniMax H3 with your 360 LoRA. Uses the working eye-lock prompt unless you enable a custom prompt. All reconstruction views come from the generated video.</p>
+        <label for="generation-policy">Video selection</label>
+        <select id="generation-policy">
+          <option value="review">Review candidates and approve one (recommended)</option>
+          <option value="first">Generate one and continue automatically</option>
+        </select>
+        <label for="candidate-count" id="candidate-count-label">Maximum candidates per batch</label>
+        <input id="candidate-count" type="number" min="1" max="20" value="5">
+        <p id="generation-policy-hint" class="hint">Check for blinking, moving eyes, facial changes and a complete orbit. You can generate more and keep all earlier options.</p>
+        <div id="generation-status" role="status" aria-live="polite"></div>
+        <button type="button" id="generation-stop" hidden>Stop generating</button>
+      </div>
       <div id="video-options" hidden>
-        <p class="hint">Use an existing orbit video. Preview it before approving. The person should stay still while the camera moves; the close-up recipe can skip missing rear views.</p>
-        <label><input type="checkbox" id="approved-video"> I reviewed this video and approve it for reconstruction.</label>
-        <label for="video-preset">Video recipe</label>
+        <p class="hint" id="existing-video-hint">Use an existing orbit video. Preview it before approving. The person should stay still while the camera moves; the close-up recipe can skip missing rear views.</p>
+        <label id="existing-video-approval"><input type="checkbox" id="approved-video"> I reviewed this video and approve it for reconstruction.</label>
+        <label for="video-preset">Reconstruction</label>
         <select id="video-preset">
-          <option value="standard">Full 360 — standard reconstruction</option>
-          <option value="closeup">Close-up: skip missing back — recommended for faces</option>
-          <option value="partial-hull">Partial silhouette hull — comparison method</option>
+          <option value="automatic">Automatic — aim for 360°, skip unusable views (recommended)</option>
+          <option value="closeup">Front and sides only — incomplete video</option>
         </select>
-        <label for="video-coverage">Camera coverage</label>
-        <select id="video-coverage">
-          <option value="full">Full 360° — require cameras around the entire subject</option>
-          <option value="partial">Front and sides — skip views whose cameras cannot be recovered</option>
-        </select>
-        <p class="hint">Front and sides works with incomplete close-up orbits. The missing back is not reconstructed; the preview stays within recovered views.</p>
-        <label for="video-initialization">Starting geometry</label>
-        <select id="video-initialization">
-          <option value="auto">Automatic — recovered points for partial, silhouettes for full</option>
-          <option value="sparse">Recovered 3D points — cleaner close-up faces</option>
-          <option value="hull">Silhouette hull — original method</option>
-        </select>
+        <p class="hint" id="reconstruction-hint">Tries a full 360° reconstruction. If some views cannot be aligned, uses the remaining views when enough usable data exists. Missing areas will not be reconstructed, and the result will be labelled incomplete.</p>
+        <details>
+        <summary>Advanced reconstruction settings</summary>
         <label for="video-iterations">Training steps</label>
         <input id="video-iterations" type="number" min="100" max="100000" value="15000">
         <label for="video-stride">Use every Nth video frame</label>
         <input id="video-stride" type="number" min="1" max="30" value="2">
         <label for="video-height">Maximum frame height (pixels)</label>
         <input id="video-height" type="number" min="256" max="2160" value="1280">
-        <p class="hint">The close-up recipe uses 7,500 steps and verified camera poses. Missing rear views are skipped, not guessed. Individual settings can override the recipe. No image-edit model is run.</p>
+        </details>
       </div>
       <label for="experiment">Experiment name or number</label>
       <input id="experiment" type="text" placeholder="3  or  face-v2" spellcheck="false">
@@ -564,6 +621,7 @@
           </span></span>
         </span>
         <span class="check">
+          <label><input type="checkbox" id="combined-ply" checked> Collect batch PLY files in one final_ply folder (project folders contain shortcuts)</label>
           <label><input type="checkbox" id="redo"> Rebuild finished ones</label>
           <span class="help" tabindex="0" aria-label="Rebuild finished ones help">?<span class="tip">
             By default a photo that already has a finished splat is skipped so you can stop and continue a batch. Tick this to build those again. Same as <code>--redo</code>.
@@ -607,6 +665,18 @@
       </div>
       <div class="hint" id="preview-hint"></div>
       <ul class="photos" id="photos" hidden role="listbox" aria-label="Processing order. Drag to reorder."></ul>
+    </section>
+    <section id="candidates-wrap" hidden style="grid-column:1 / -1">
+      <h2>Choose a 360 video</h2>
+      <p class="hint">Play each full orbit, especially the eyes and rear view. You can approve any completed video immediately: remaining generation is cancelled before reconstruction starts. Completed options are kept. Use Generate more for another batch.</p>
+      <div id="candidate-gallery" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:16px"></div>
+      <button type="button" id="generate-more">Generate more candidates</button>
+    </section>
+    <section id="generated-batch-results" hidden style="grid-column:1 / -1">
+      <h2>Automated batch</h2>
+      <p id="generated-batch-status" role="status"></p>
+      <p class="hint">Times use this computer’s local time (12-hour AM/PM). Dates are shown for runs spanning multiple days. Older results may not have recorded timings.</p>
+      <div class="batch-table-scroll"><table class="batch-results-table"><thead><tr><th scope="col">Original image</th><th scope="col">Status</th><th scope="col">Project / output</th><th scope="col">Started</th><th scope="col">Finished</th><th scope="col">Duration</th></tr></thead><tbody id="generated-batch-items"></tbody></table></div>
     </section>
     <section id="viewer-wrap">
       <div class="viewer-head">
@@ -678,6 +748,11 @@
     let stickBottom = true;
     let barNode = null;
     let running = false;
+    let generationActive = false;
+    let generationState = null;
+    let generationSignature = "";
+    let generationRestored = false;
+    let restoredBatchOrder = null;
     let queue = [];
     let naturalOrder = [];
     let queueFolder = "";
@@ -812,6 +887,14 @@
       };
     }
 
+    function isGeneratedResult(s) {
+      const g = generationState;
+      return mode() === "generate" && g?.selected && !g.active
+        && g.experiment === $("experiment").value.trim()
+        && (sameFolder(g.input, $("path").value.trim()) || (isGenerationBatch() && sameFolder(g.batch?.input || "", $("path").value.trim())))
+        && g.candidates.some(c => c.id === g.selected && sameFolder(c.path, s?.input || ""));
+    }
+
     function applyViewer(s) {
       const server = s && s.preview && s.preview.items && s.preview.items.length ? s.preview : null;
       const qPrev = queuePreview();
@@ -819,7 +902,7 @@
       const folderMismatch = queueFolder && serverInput && !sameFolder(queueFolder, serverInput)
         && !(queue[0] && queue[0].path && sameFolder(queue[0].path, serverInput));
       let data = null;
-      if (s && s.running && server) data = server;
+      if (s && (s.running || isGeneratedResult(s)) && server) data = server;
       else if (folderMismatch && qPrev) data = qPrev;
       else if (server) data = server;
       else if (qPrev) data = qPrev;
@@ -1213,7 +1296,7 @@
     }
 
     function formStagePlan() {
-      if (mode() === "video") {
+      if (mode() === "video" || mode() === "generate") {
         const fallback = [
           ["prepare", "Prepare video frames", "Extract alternate frames and isolate the person", 180],
           ["calibrate", "Recover cameras", "Match foreground features and check the orbit", 60],
@@ -1295,7 +1378,7 @@
       const formNoOrbit = $("no_orbit").checked;
       let rows;
       let caption = formPreset;
-      if ((s && s.mode === "video" && (s.running || s.status === "done")) || (!(s && s.running) && mode() === "video")) {
+      if ((s && s.mode === "video" && (s.running || s.status === "done")) || (!(s && s.running) && ["video", "generate"].includes(mode()))) {
         rows = s && s.mode === "video" && s.stages && s.stages.length ? s.stages : formStagePlan();
         caption = "360 video";
       } else if (s && !s.running && s.mode === "video") {
@@ -1313,6 +1396,23 @@
         caption = s.preset || formPreset;
       } else {
         rows = formStagePlan();
+      }
+      if (mode() === "generate") {
+        const g = generationMatchesForm() ? generationState : {};
+        const automatic = isGenerationBatch() || (g.policy || $("generation-policy").value) === "first";
+        const selected = !!g.selected || g.status === "reconstructing";
+        const generated = !!g.candidates?.length && !g.active;
+        if (g.active) rows = formStagePlan();
+        rows = [
+          {id:"generate", title:"Generate 360 videos", detail:generated ? `${g.candidates.length} saved video option(s) · MiniMax H3` : g.message || "MiniMax H3 · exact workflow prompt and 360 LoRA", included:true,
+           status:g.active ? "running" : generated ? "done" : g.status === "failed" ? "failed" : "pending",
+           percent:100*((g.completed || 0)+(g.progress || 0))/Math.max(1,g.requested || 1)},
+          {id:"review", title:automatic ? "Use first video automatically" : "Review and select a video",
+           detail:automatic ? "Continues without a manual review" : "Check the eyes and complete orbit; generate more if needed",
+           included:true, status:selected ? "done" : generated ? "running" : "pending"},
+          ...rows
+        ].map((r,i) => ({...r,index:i+1}));
+        caption = "Front image → 360 video → splat";
       }
       const cap = $("stage-plan-caption");
       if (cap) cap.textContent = caption;
@@ -1400,26 +1500,28 @@
     function applyStatus(s) {
       if (!s) return;
       lastStatus = s;
-      running = !!s.running;
+      running = !!s.running || generationActive;
       $("reset-run").disabled = running;
       $("reset-run").title = running ? "Stop the current run before resetting" : "Clear the GUI; saved files are kept";
       if (running) $("reset-confirm").hidden = true;
       setFormLocked(running);
       $("start").disabled = running;
-      const stopAfterOff = !running || s.mode !== "batch" || !!s.stop_mode;
-      const stopNowOff = !running || s.stop_mode === "now";
+      const batchActive = generationState?.batch?.active;
+      const stopMode = batchActive ? generationState.batch.stop_mode : s.stop_mode;
+      const stopAfterOff = !running || (s.mode !== "batch" && !batchActive) || !!stopMode;
+      const stopNowOff = !running || stopMode === "now";
       $("stop-after").disabled = stopAfterOff;
       $("stop-now").disabled = stopNowOff;
       const stopAfterTop = $("stop-after-top");
       const stopNowTop = $("stop-now-top");
       if (stopAfterTop) stopAfterTop.disabled = stopAfterOff;
       if (stopNowTop) stopNowTop.disabled = stopNowOff;
-      if (running && !runOpenedByUser) setRunCollapsed(true);
+      if (running && !generationActive && !runOpenedByUser) setRunCollapsed(true);
       else syncRunToolbar();
       $("reset-order").disabled = running || !queue.length;
       $("photos").classList.toggle("locked", running);
       for (const li of $("photos").children) {
-        li.draggable = !running && mode() === "batch" && queue.length > 1;
+        li.draggable = !running && isBatchInput() && queue.length > 1;
       }
       setBar("bar-batch", s.batch_percent != null ? s.batch_percent : s.percent);
       setBar("bar-char", s.image_percent);
@@ -1466,10 +1568,34 @@
       applyViewer(s);
       applyStages(s);
       applyFolderRow(s);
+      if (!s.running && mode() === "generate" && generationMatchesForm() && !(isGeneratedResult(s) && s.status === "done")) {
+        $("current").textContent = generationState.message;
+      }
+      if (generationState?.active) {
+        const candidatePct = 100 * (generationState.progress || 0);
+        const batchPct = 100 * ((generationState.completed || 0) + (generationState.progress || 0)) / Math.max(1, generationState.requested || 1);
+        setBar("bar-batch", batchPct); setBar("bar-char", candidatePct); setBar("bar-stage", candidatePct);
+        $("batch-pct").textContent = pctText(batchPct);
+        $("char-pct").textContent = pctText(candidatePct);
+        $("stage-pct").textContent = pctText(candidatePct);
+        $("current").textContent = generationState.message;
+        $("stage-meta").textContent = "Generate 360 video";
+        $("char-meta").textContent = generationState.input.split(/[\\/]/).pop();
+        $("batch-meta").textContent = `${generationState.completed} of ${generationState.requested} videos generated`;
+      }
+      const batch = generationState?.batch;
+      if (batch?.items?.length && isGenerationBatch()) {
+        const percent = 100 * batch.completed / batch.total;
+        setBar("bar-batch", percent);
+        $("batch-pct").textContent = pctText(percent);
+        $("batch-meta").textContent = `${batch.completed} of ${batch.total} splats complete`;
+        $("current").textContent = batch.message + (batch.active ? " · " + (generationState.message || "") : "");
+      }
     }
 
-    const FORM_IDS = ["method", "approved-video", "video-preset", "video-coverage", "video-initialization", "video-iterations", "video-stride", "video-height", "path", "browse", "experiment", "preset", "recursive", "redo", "no_orbit", "debug", "extra"];
+    const FORM_IDS = ["method", "approved-video", "video-preset", "video-iterations", "video-stride", "video-height", "path", "browse", "experiment", "preset", "recursive", "redo", "combined-ply", "no_orbit", "debug", "extra"];
     function setFormLocked(locked) {
+      for (const id of ["generation-policy", "candidate-count", "generation-source", "custom-prompt-enabled", "custom-prompt", "restore-default-prompt", "generation-recursive", "generation-redo", "generation-combined-ply"]) $(id).disabled = locked;
       for (const id of FORM_IDS) {
         const el = $(id);
         if (el) el.disabled = locked;
@@ -1697,14 +1823,14 @@
     function rebuildList() {
       const ul = $("photos");
       const scroll = ul.scrollTop;
-      const batch = mode() === "batch";
+      const batch = isBatchInput();
       showQueue(batch && queue.length > 0);
       ul.innerHTML = "";
       queue.forEach((p, i) => {
         const li = document.createElement("li");
         li.dataset.file = p.file;
         li.tabIndex = 0;
-        li.draggable = !running && mode() === "batch" && queue.length > 1;
+        li.draggable = !running && isBatchInput() && queue.length > 1;
         li.setAttribute("role", "option");
         li.setAttribute("aria-label", `${i + 1}. ${p.file}`);
         li.title = p.path || p.file;
@@ -1848,7 +1974,7 @@
       let htmlDrag = false;
 
       ul.addEventListener("pointerdown", (e) => {
-        if (running || mode() !== "batch" || queue.length < 2) return;
+        if (running || !isBatchInput() || queue.length < 2) return;
         if (e.pointerType === "mouse") return;
         const li = e.target.closest("li[data-file]");
         if (!li || e.button !== 0) return;
@@ -1892,7 +2018,7 @@
 
       ul.addEventListener("dragstart", (e) => {
         const li = e.target.closest("li[data-file]");
-        if (!li || running || mode() !== "batch" || queue.length < 2) {
+        if (!li || running || !isBatchInput() || queue.length < 2) {
           e.preventDefault();
           return;
         }
@@ -1982,7 +2108,7 @@
     window.addEventListener("drop", (e) => {
       e.preventDefault();
       $("photos").classList.remove("drop-hover");
-      if (running || mode() !== "batch" || !queue.length) return;
+      if (running || !isBatchInput() || !queue.length) return;
       const names = [...(e.dataTransfer && e.dataTransfer.files) || []].map((f) => f.name);
       if (!names.length) return;
       const overList = e.target && (e.target.id === "photos" || (e.target.closest && e.target.closest("#photos")));
@@ -2002,35 +2128,233 @@
     });
 
     function mode() {
+      if ($("method").value === "generate") return "generate";
       if ($("method").value === "video") return "video";
       return document.querySelector("input[name=mode]:checked").value;
     }
 
+    function isGenerationBatch() {
+      return mode() === "generate" && $("generation-source").value === "folder";
+    }
+
+    function isBatchInput() {
+      return mode() === "batch" || isGenerationBatch();
+    }
+
+    function generationMatchesForm() {
+      const g = generationState;
+      const input = isGenerationBatch() ? g?.batch?.input : g?.input;
+      return !!input && sameFolder(input, $("path").value.trim()) && (g.batch?.experiment || g.experiment) === $("experiment").value.trim();
+    }
+
+    let workingPrompt = null;
+    async function loadWorkingPrompt() {
+      if (workingPrompt === null) {
+        const response = await fetch("/api/generation/default-prompt");
+        if (!response.ok) throw new Error("Could not load the working MiniMax prompt. Refresh the GUI and try again.");
+        workingPrompt = (await response.json()).prompt;
+      }
+      if (!$("custom-prompt").value) $("custom-prompt").value = workingPrompt;
+      return workingPrompt;
+    }
+    $("custom-prompt-enabled").onchange = async () => {
+      $("custom-prompt-editor").hidden = !$("custom-prompt-enabled").checked;
+      if ($("custom-prompt-enabled").checked) {
+        try { await loadWorkingPrompt(); } catch (err) { showStartError(err.message); }
+      }
+    };
+    $("restore-default-prompt").onclick = async () => {
+      try { $("custom-prompt").value = await loadWorkingPrompt(); } catch (err) { showStartError(err.message); }
+    };
+
+    function updateInputExample() {
+      const selected = mode();
+      const folder = isGenerationBatch() || selected === "batch";
+      $("path").placeholder = selected === "video" ? "D:\\videos\\orbit.mp4"
+        : folder ? "D:\\photos\\front-facing-images"
+        : selected === "generate" ? "D:\\photos\\front-facing.png" : "D:\\photos\\alice.png";
+      $("path-label").textContent = selected === "video" ? "Pre-generated 360° video (MP4)"
+        : isGenerationBatch() ? "Folder of front-facing images"
+        : selected === "batch" ? "Folder of photos"
+        : selected === "generate" ? "Front image (PNG, JPG, WebP, BMP or TIFF)" : "Photo";
+    }
+
     function updateMethod() {
-      const video = mode() === "video";
+      const generate = mode() === "generate";
+      const video = mode() === "video" || generate;
+      $("generation-options").hidden = !generate;
+      $("existing-video-hint").hidden = generate;
+      $("existing-video-approval").hidden = generate;
       $("image-modes").hidden = video;
       $("image-options").hidden = video;
       $("video-options").hidden = !video;
-      $("path-label").textContent = video ? "Pre-generated 360° video (MP4)" : "Photo or folder";
-      $("path").placeholder = video ? "D:\\videos\\orbit.mp4" : "D:\\photos\\alice.png or D:\\photos\\characters";
+      updateInputExample();
+      $("generation-batch-hint").hidden = !isGenerationBatch();
+      $("generation-batch-options").hidden = !isGenerationBatch();
       $("approved-video").checked = false;
+      $("start").textContent = generate ? "Generate 360 videos" : "Start";
+      if (isGenerationBatch()) $("start").textContent = "Start automated folder batch";
       setQueue([], { natural: true, folder: "", recursive: false });
       showQueue(false);
       applyStages(lastStatus);
       refreshPreview();
     }
+    function reconstructionConfig() {
+      return $("video-preset").value === "closeup"
+        ? {coverage:"partial", initialization:"sparse"}
+        : {coverage:"auto", initialization:"auto"};
+    }
+    function updateReconstructionHint() {
+      $("reconstruction-hint").textContent = $("video-preset").value === "closeup"
+        ? "Uses the front and side views that can be recovered. The missing back will not be reconstructed. Choose this only when the video does not provide a usable full orbit."
+        : "Tries a full 360° reconstruction. If some views cannot be aligned, uses the remaining views when enough usable data exists. Missing areas will not be reconstructed, and the result will be labelled incomplete.";
+    }
     $("video-preset").addEventListener("change", () => {
-      const presets = {
-        standard: ["full", "hull", 15000],
-        closeup: ["partial", "sparse", 7500],
-        "partial-hull": ["partial", "hull", 7500]
-      };
-      const [coverage, initialization, steps] = presets[$("video-preset").value];
-      $("video-coverage").value = coverage;
-      $("video-initialization").value = initialization;
-      $("video-iterations").value = steps;
+      $("video-iterations").value = $("video-preset").value === "closeup" ? 7500 : 15000;
+      updateReconstructionHint();
     });
     $("method").addEventListener("change", updateMethod);
+    $("generation-source").onchange = () => {
+      if (isGenerationBatch()) {
+        $("generation-policy").value = "first";
+        $("generation-policy").onchange();
+      }
+      $("path").value = "";
+      updateMethod();
+    };
+    $("generation-policy").onchange = () => {
+      const auto = $("generation-policy").value === "first";
+      $("candidate-count").hidden = auto;
+      $("candidate-count-label").hidden = auto;
+      $("generation-policy-hint").textContent = auto
+        ? "One video will go straight to reconstruction without review. Blinks and moving eyes can affect the splat."
+        : "Check the eyes and complete orbit. Approve one video or generate more options.";
+      if (isGenerationBatch()) $("generation-policy-hint").textContent = "Folder mode accepts one video automatically for each image. Choose automatic first-video selection, or set the maximum to 1.";
+      if (lastStatus) applyStages(lastStatus);
+    };
+    $("generation-stop").onclick = () => post("/api/generation/stop", {});
+    $("generate-more").onclick = () => {
+      $("generation-policy").value = "review";
+      $("generation-policy").onchange();
+      $("start").click();
+    };
+
+    async function pollGeneration() {
+      try {
+        const g = await fetch("/api/generation").then(r => r.json());
+        generationState = g;
+        const batch = g.batch || {active:false, items:[]};
+        if (batch.input && isGenerationBatch() && sameFolder(batch.input, $("path").value.trim())) {
+          mergeRunStatus(batch.items.map(item => ({file:item.input.slice(batch.input.length + 1), name:item.name, status:item.status, current:item.status === "running"})));
+        }
+        generationActive = !!g.active || !!batch.active;
+        if (!generationRestored && (g.input || batch.input)) {
+          generationRestored = true;
+          $("method").value = "generate";
+          $("generation-source").value = batch.input ? "folder" : "single";
+          $("path").value = batch.input || g.input;
+          $("experiment").value = batch.experiment || g.experiment;
+          $("generation-policy").value = batch.input ? (batch.settings?.generation_policy || "first") : g.policy;
+          const fields = {video_preset:"video-preset", iterations:"video-iterations", stride:"video-stride", max_height:"video-height", candidate_count:"candidate-count"};
+          const settings = batch.input ? batch.settings : g.settings;
+          if (batch.input) restoredBatchOrder = settings?.order || [];
+          $("generation-recursive").checked = !!settings?.recursive;
+          $("generation-redo").checked = !!settings?.redo;
+          $("generation-combined-ply").checked = settings?.combined_ply !== false;
+          $("custom-prompt-enabled").checked = settings?.custom_prompt_enabled === true;
+          $("custom-prompt").value = settings?.custom_prompt || "";
+          $("custom-prompt-enabled").onchange();
+          for (const [key,id] of Object.entries(fields)) if (settings?.[key] != null) $(id).value = settings[key];
+          if (!$("video-preset").value) $("video-preset").value = settings?.coverage === "partial" ? "closeup" : "automatic";
+          updateReconstructionHint();
+          $("generation-policy").onchange();
+          updateMethod();
+        }
+        $("generation-status").textContent = generationMatchesForm() ? g.message || "" : "";
+        $("generation-stop").hidden = !generationActive;
+        $("generation-stop").textContent = batch.active ? "Stop batch now" : "Stop generating";
+        $("generated-batch-results").hidden = !batch.items.length || !isGenerationBatch();
+        $("generated-batch-status").textContent = batch.message || "";
+        const batchSignature = JSON.stringify(batch.items);
+        if ($("generated-batch-items").dataset.signature !== batchSignature) {
+          $("generated-batch-items").dataset.signature = batchSignature;
+          $("generated-batch-items").replaceChildren();
+          for (const item of batch.items) {
+            const row = document.createElement("tr");
+            const cell = text => {const td=document.createElement("td");td.textContent=text;row.append(td);return td;};
+            const original = item.input.replace(/\\/g,"/").split("/").pop();
+            const nameCell=cell(original); nameCell.title=item.input;
+            const statusCell=cell(""); const badge=document.createElement("span");
+            badge.className="batch-status "+(["done","skipped","running","failed","stopped"].includes(item.status)?item.status:"queued");
+            badge.textContent=({done:"Finished",skipped:"Already finished",running:"Running",failed:"Failed",stopped:"Stopped",queued:"Queued"})[item.status] || item.status;
+            statusCell.append(badge);
+            for (const note of [item.error,item.warning]) if(note) {const small=document.createElement("small");small.className="batch-note";small.textContent=note;statusCell.append(small);}
+            const files=cell("");
+            const addLink=(label,where)=>{const button=document.createElement("button");button.textContent=label;
+              button.onclick=async()=>{const result=await post("/api/open_folder",{experiment:batch.experiment,name:item.name,mode:"video",where});$("folder-feedback").textContent=result.ok?"Opened in File Explorer.":result.error;};files.append(button);};
+            if(item.status!=="queued") addLink("Open project","work");
+            if(item.status==="done" || item.status==="skipped") {addLink("Show PLY","ply");files.title=item.ply || "";}
+            const showDate = item.started_at && item.finished_at && new Date(item.started_at*1000).toDateString()!==new Date(item.finished_at*1000).toDateString();
+            const formatTime = value => value ? new Date(value*1000).toLocaleString("en-GB",{...(showDate?{day:"numeric",month:"short",year:"numeric"}:{}),hour:"numeric",minute:"2-digit",hour12:true}).replace(/am|pm/g,s=>s.toUpperCase()) : "—";
+            cell(formatTime(item.started_at));cell(formatTime(item.finished_at));
+            const mins=Number.isFinite(item.duration_seconds)?Math.floor(item.duration_seconds/60):null;
+            cell(mins===null?"—":`${Math.floor(mins/60)}h ${mins%60}m`);
+            $("generated-batch-items").append(row);
+          }
+        }
+        const sameProject = g.input && g.input.replace(/\\/g,"/").toLowerCase() === $("path").value.trim().replace(/\\/g,"/").toLowerCase() && g.experiment === $("experiment").value.trim();
+        $("candidates-wrap").hidden = isGenerationBatch() || !g.candidates.length || mode() !== "generate" || !sameProject;
+        $("generate-more").disabled = g.active || !!lastStatus?.running;
+        const signature = JSON.stringify(g.candidates.map(c => c.id));
+        if (signature !== generationSignature) {
+          generationSignature = signature;
+          $("candidate-gallery").replaceChildren();
+          g.candidates.forEach((c, i) => {
+            const card = document.createElement("article");
+            card.dataset.candidateId = c.id;
+            const label = document.createElement("p");
+            label.textContent = `Option ${i+1} · seed ${c.seed}`;
+            const video = document.createElement("video");
+            video.controls = true; video.loop = true; video.muted = true;
+            video.preload = "metadata"; video.style.cssText = "width:100%;max-height:390px;background:#111;border-radius:8px";
+            video.src = "/api/media?p=" + encodeURIComponent(c.path);
+            const choose = document.createElement("button");
+            choose.textContent = "Approve this video & reconstruct";
+            choose.onclick = async () => {
+              choose.disabled = true;
+              const result = await post("/api/generation/select", {id:c.id, settings: {
+                video_preset: $("video-preset").value, ...reconstructionConfig(),
+                iterations: Number($("video-iterations").value),
+                stride: Number($("video-stride").value), max_height: Number($("video-height").value)
+              }});
+              if (!result.ok) showStartError(result.error);
+              else { runOpenedByUser = false; setRunCollapsed(true); }
+              pollGeneration();
+            };
+            card.append(label, video, choose);
+            $("candidate-gallery").append(card);
+          });
+        }
+        $("candidate-gallery").querySelectorAll("button").forEach(b => {
+          b.disabled = g.status === "stopping" || !!lastStatus?.running;
+          b.textContent = g.active ? "Approve this video, cancel rest & reconstruct" : "Approve this video & reconstruct";
+        });
+        $("candidate-gallery").querySelectorAll("article").forEach(card => card.classList.toggle("selected", card.dataset.candidateId === g.selected));
+        if (lastStatus) applyStatus(lastStatus);
+        if (batch.active) {
+          $("start").textContent = "Processing folder…";
+        } else if (isGenerationBatch()) {
+          $("start").textContent = "Start automated folder batch";
+        } else if (g.active) {
+          $("current").textContent = g.message;
+          $("start").textContent = "Generating…";
+        } else if (mode() === "generate") {
+          $("start").textContent = g.candidates.length ? "Generate more videos" : "Generate 360 videos";
+        }
+      } catch (_) { /* Keep the last state during a brief connection interruption. */ }
+    }
+    setInterval(pollGeneration, 1500);
+    pollGeneration();
     $("path").addEventListener("input", () => { $("approved-video").checked = false; });
 
     async function post(url, body) {
@@ -2051,7 +2375,7 @@
 
     $("browse").onclick = async () => {
       $("error").textContent = "";
-      const data = await post("/api/browse", { kind: mode() === "video" ? "video" : mode() === "batch" ? "folder" : "file" });
+      const data = await post("/api/browse", { kind: isGenerationBatch() ? "folder" : mode() === "video" ? "video" : mode() === "batch" ? "folder" : "file" });
       if (data.path) {
         $("approved-video").checked = false;
         $("path").value = data.path;
@@ -2066,7 +2390,7 @@
         setQueue([], { natural: true, dirty: false, folder: "", recursive: $("recursive").checked });
         return;
       }
-      const recursive = $("recursive").checked;
+      const recursive = isGenerationBatch() ? $("generation-recursive").checked : $("recursive").checked;
       const requestedMode = mode();
       const data = await post("/api/preview", { input: path, recursive, mode: requestedMode });
       if (path !== $("path").value.trim() || requestedMode !== mode()) return;
@@ -2079,6 +2403,7 @@
       $("preview-hint").textContent = data.mode === "video" ? "Preview the complete source video, then confirm approval above." : data.mode === "single"
         ? `One photo: ${incoming[0] ? incoming[0].file : path}`
         : `${data.count} photo(s) in this folder${extra}. Drag to set processing order.`;
+      if (isGenerationBatch()) $("preview-hint").textContent = `${data.count} image(s). Drag to choose processing order, or use Alt+Up / Alt+Down.`;
 
       const folder = data.path || path;
       const keep = queueDirty && sameFolder(queueFolder, folder) && queueRecursive === recursive;
@@ -2092,6 +2417,11 @@
         next = applyClientOrder(incoming, saved.files);
         dirty = true;
       }
+      if (isGenerationBatch() && restoredBatchOrder) {
+        next = applyClientOrder(incoming, restoredBatchOrder);
+        dirty = restoredBatchOrder.length > 0;
+        restoredBatchOrder = null;
+      }
       setQueue(next, { dirty, folder, recursive });
       naturalOrder = incoming.map((p) => ({ ...p }));
     }
@@ -2101,9 +2431,11 @@
       if (e.key === "Enter") refreshPreview();
     });
     $("recursive").addEventListener("change", refreshPreview);
+    $("generation-recursive").addEventListener("change", refreshPreview);
     document.querySelectorAll("input[name=mode]").forEach((el) => {
       el.addEventListener("change", () => {
-        showQueue(mode() === "batch" && queue.length > 0);
+        updateInputExample();
+        showQueue(isBatchInput() && queue.length > 0);
         refreshPreview();
       });
     });
@@ -2120,27 +2452,35 @@
       failDismissedKey = "";
       const payload = {
         mode: mode(),
+        generation_batch: isGenerationBatch(),
+        custom_prompt_enabled: $("custom-prompt-enabled").checked,
+        custom_prompt: $("custom-prompt").value,
+        generation_policy: $("generation-policy").value,
+        candidate_count: Number($("candidate-count").value),
         approved_video: $("approved-video").checked,
         video_preset: $("video-preset").value,
-        coverage: $("video-coverage").value,
-        initialization: $("video-initialization").value,
+        ...reconstructionConfig(),
         iterations: Number($("video-iterations").value),
         stride: Number($("video-stride").value),
         max_height: Number($("video-height").value),
         input: $("path").value.trim(),
         experiment: $("experiment").value.trim(),
         preset: $("preset").value,
-        recursive: $("recursive").checked,
-        redo: $("redo").checked,
+        recursive: isGenerationBatch() ? $("generation-recursive").checked : $("recursive").checked,
+        redo: isGenerationBatch() ? $("generation-redo").checked : $("redo").checked,
+        combined_ply: isGenerationBatch() ? $("generation-combined-ply").checked : $("combined-ply").checked,
         no_orbit: $("no_orbit").checked,
         debug: $("debug").checked,
         extra: $("extra").value.trim(),
-        order: mode() === "batch" ? queue.map((p) => p.file) : []
+        order: isBatchInput() ? queue.map((p) => p.file) : []
       };
       if (!payload.input) { showStartError(mode() === "video" ? "Choose a 360° MP4 video." : "Choose a photo or a folder."); return; }
       if (payload.mode === "video" && !payload.approved_video) { showStartError("Review the video, then tick the approval checkbox before training."); return; }
       if (!payload.experiment) { showStartError("Enter an experiment name or number."); return; }
-      if (payload.mode === "batch") {
+      if (payload.generation_batch && payload.generation_policy !== "first" && payload.candidate_count !== 1) {
+        showStartError("Automated folder batches require first-video selection or exactly one candidate."); return;
+      }
+      if (payload.mode === "batch" || payload.generation_batch) {
         if (!queue.length || !sameFolder(payload.input, queueFolder) || payload.recursive !== queueRecursive) {
           await refreshPreview();
         }
@@ -2156,19 +2496,20 @@
       }
       $("start").disabled = true;
       $("current").textContent = "Starting…";
-      const data = await post("/api/run", payload);
+      const data = await post(payload.mode === "generate" ? "/api/generation/start" : "/api/run", payload);
       if (!data.ok) {
         $("start").disabled = false;
         showStartError(data.error || "Could not start.");
         return;
       }
       runOpenedByUser = false;
+      if (payload.mode === "generate") { generationActive = true; runOpenedByUser = true; setRunCollapsed(false); pollGeneration(); return; }
       setRunCollapsed(true);
     };
 
     async function requestStop(how) {
       $("error").textContent = "";
-      const data = await post("/api/stop", { how });
+      const data = await post(generationActive ? "/api/generation/stop" : "/api/stop", { how });
       if (!data.ok) $("error").textContent = data.error || "";
     }
 
@@ -2177,6 +2518,13 @@
     $("stop-after-top").onclick = () => requestStop("after");
     $("stop-now-top").onclick = () => requestStop("now");
     function resetForNextVideo(s) {
+      const resetMethod = $("method").value;
+      generationState = null;
+      generationActive = false;
+      generationSignature = "";
+      generationRestored = false;
+      $("candidate-gallery").replaceChildren();
+      $("candidates-wrap").hidden = true;
       $("reset-confirm").hidden = true;
       $("reset-slider").value = "0";
       $("reset-error").textContent = "";
@@ -2188,7 +2536,7 @@
       $("error").textContent = "";
       failDismissedKey = "";
       consoleEl.replaceChildren();
-      $("method").value = "video";
+      $("method").value = resetMethod;
       lastStatus = s;
       updateMethod();
       showViewerEmpty();
@@ -2235,23 +2583,26 @@
       paintFailPanel(lastStatus);
     };
 
-    async function openWorkFolder() {
+    async function openWorkFolder(where = "work") {
+      if (typeof where !== "string") where = "work";
       $("error").textContent = "";
+      $("folder-feedback").textContent = "Opening File Explorer…";
       const s = lastStatus || {};
       const data = await post("/api/open_folder", {
         experiment: s.experiment || $("experiment").value.trim(),
         name: (s.preview && s.preview.name) || s.run_name || s.image_name || "",
-        where: "work",
+        where,
+        work_dir: s.work_dir || "",
         mode: s.mode || mode(),
       });
-      if (data.error === "not found") {
-        $("error").textContent = "Restart the GUI window (run_splat_gui.bat) so it can open folders.";
-        return;
-      }
-      if (!data.ok) $("error").textContent = data.error || "Could not open that folder.";
+      $("folder-feedback").textContent = data.ok
+        ? (where === "ply" ? "Selected final PLY in File Explorer." : "Opened working folder in File Explorer.")
+        : data.error || "Could not open File Explorer.";
     }
 
     function applyFolderRow(s) {
+      $("coverage-note").textContent = s.coverage_note || "";
+      $("coverage-note").hidden = !s.coverage_note;
       const name = (s.preview && s.preview.name) || s.run_name || s.image_name || "";
       const experiment = s.experiment || $("experiment").value.trim();
       const ready = !!(experiment && name);
@@ -2264,12 +2615,14 @@
           : "Opens this character's working folder in File Explorer";
       }
       if (failBtn) failBtn.disabled = !ready;
+      $("open-ply").hidden = !(ready && s.status === "done" && s.final_exists);
       const pathEl = $("folder-path");
       if (pathEl) pathEl.textContent = s.work_dir || "";
     }
 
     $("open-work").onclick = openWorkFolder;
     $("fail-open-work").onclick = openWorkFolder;
+    $("open-ply").onclick = () => openWorkFolder("ply");
 
     function onEvent(ev) {
       if (ev.type === "reset") { resetForNextVideo(ev); return; }
@@ -2312,6 +2665,7 @@
     }).catch(() => {});
     $("preset").addEventListener("change", () => applyStages(lastStatus));
     $("no_orbit").addEventListener("change", () => applyStages(lastStatus));
+    updateMethod();
     applyStages({});
     fetch("/api/status").then((r) => r.json()).then(applyStatus).catch(() => {});
     connect();

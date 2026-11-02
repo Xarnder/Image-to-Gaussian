@@ -14,6 +14,11 @@ from pathlib import Path
 import cv2
 import numpy as np
 from PIL import Image, ImageDraw
+from i2g.paths import deliverable_path
+
+
+def final_path(args, root, kind):
+    return deliverable_path(root / "final", args.name or args.input.stem, kind, args.experiment)
 
 
 def progress(stage, fraction=0., detail=""):
@@ -50,7 +55,7 @@ def prepare(args, root):
             raise ValueError("Input/settings changed: use a new output directory")
     if args.approved_video:
         write_json(root / "approval.json", {"sha256": digest, "approved": True,
-                   "basis": "User supplied this MP4 as an approved orbit"})
+                   "basis": getattr(args, "approval_basis", "manual-review")})
     approval = root / "approval.json"
     approved = json.loads(approval.read_text()) if approval.exists() else {}
     if approved.get("sha256") != digest or approved.get("approved") is not True:
@@ -108,6 +113,15 @@ def prepare(args, root):
 
 
 def check_coverage(summary, coverage):
+    if coverage == "auto":
+        try:
+            check_coverage(summary, "full")
+            summary.pop("fallback_reason", None)
+        except RuntimeError as exc:
+            check_coverage(summary, "partial")
+            summary["fallback_reason"] = str(exc)
+        summary["requested_coverage"] = "auto"
+        return summary
     if coverage == "partial":
         if summary["registered"] < 12 or summary["points"] < 1000:
             raise RuntimeError("Partial reconstruction needs at least 12 cameras and 1,000 sparse points")
@@ -146,7 +160,7 @@ def calibrate(root, coverage="full"):
             if Path(summary["model"]).is_dir():
                 check_coverage(summary, coverage)
                 write_json(root / "calibration.json", summary)
-                progress("calibrate", 1., f"Using {summary['registered']} verified cameras ({coverage} coverage)")
+                progress("calibrate", 1., coverage_message(summary))
                 return
     db = root / "features.db"
     reader = p.ImageReaderOptions(camera_model="SIMPLE_PINHOLE", mask_path=str(root / "sfm_masks"))
@@ -187,7 +201,14 @@ def calibrate(root, coverage="full"):
     write_json(root / "calibration_attempt.json", summary)
     check_coverage(summary, coverage)
     write_json(root / "calibration.json", summary)
-    progress("calibrate", 1., f"Validated {model.num_reg_images()}/{total} cameras ({coverage} coverage)")
+    progress("calibrate", 1., coverage_message(summary))
+
+
+def coverage_message(summary):
+    message = f"Using {summary['registered']} verified cameras ({summary['coverage']} coverage)"
+    if summary.get("fallback_reason"):
+        message += ". Full orbit unavailable: continuing with aligned views only; missing areas are not reconstructed."
+    return message
 
 
 def fit(args, root):
@@ -251,8 +272,8 @@ def fit(args, root):
     cleaning = clean(params, views, refined, cfg)
     final = root / "final"
     final.mkdir(exist_ok=True)
-    export_ply(params, final / "character.ply")
-    torch.save({k:v.detach().cpu() for k,v in params.items()}, final / "splats.pt")
+    export_ply(params, final_path(args, root, "character.ply"))
+    torch.save({k:v.detach().cpu() for k,v in params.items()}, final_path(args, root, "splats.pt"))
     progress("export", .15, "PLY saved; evaluating reconstructed views")
     measurements, tiles = [], []
     with torch.no_grad():
@@ -272,12 +293,12 @@ def fit(args, root):
         for i,tile in enumerate(tiles):
             tile.thumbnail((400,350)); sheet.paste(tile,(i%4*400,i//4*380))
             labels.text((i%4*400+8,i//4*380+355), "Video frame                 Gaussian render", fill="white")
-        sheet.save(final / "comparison.jpg")
+        sheet.save(final_path(args, root, "comparison.jpg"))
         w,h = Image.open(records[0]["path"]).size
         ratio = min(1., 960/h); w,h = round(w*ratio),round(h*ratio)
         K = np.array(records[0]["K"]); K[:2] *= ratio
         distances = [np.linalg.norm(-np.array(r["w2c"])[:3,:3].T @ np.array(r["w2c"])[:3,3]-target) for r in records]
-        writer = cv2.VideoWriter(str(final/"turntable_raw.mp4"),cv2.VideoWriter_fourcc(*"mp4v"),24,(w,h))
+        writer = cv2.VideoWriter(str(final_path(args, root, "turntable_raw.mp4")),cv2.VideoWriter_fourcc(*"mp4v"),24,(w,h))
         if not writer.isOpened():
             raise RuntimeError("Could not open preview encoder")
         for preview_index, az in enumerate(preview_angles(summary)):
@@ -291,8 +312,8 @@ def fit(args, root):
     import imageio_ffmpeg
     progress("export", .95, "Encoding browser preview and writing quality report")
     subprocess.run([imageio_ffmpeg.get_ffmpeg_exe(), "-hide_banner", "-loglevel", "error", "-y",
-                    "-i", str(final/"turntable_raw.mp4"), "-c:v", "libx264", "-crf", "18",
-                    "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(final/"turntable.mp4")], check=True)
+                    "-i", str(final_path(args, root, "turntable_raw.mp4")), "-c:v", "libx264", "-crf", "18",
+                    "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(final_path(args, root, "turntable.mp4"))], check=True)
     report = {"input": json.loads((root/"input.json").read_text()), "calibration": summary,
               "config": config_dict(cfg), "training": stats, "cleanup": cleaning,
               "views": measurements, "heldout_mean_psnr": float(np.mean([r["foreground_psnr"] for r in measurements if r["held_out"]])),
@@ -300,32 +321,36 @@ def fit(args, root):
               "peak_allocated_vram_gib": torch.cuda.max_memory_allocated()/1024**3,
               "scale_note": "Monocular scale is arbitrary; normalized to nominal 1.7 m sparse foreground height.",
               "image_generation": False, "initialization": args.initialization,
+              "source_image": args.source_image, "output_name": args.name or args.input.stem, "experiment": args.experiment,
               "preview_note": "Observed front/side arc only; rear is unobserved" if args.coverage == "partial" else "Full orbit"}
-    write_json(final/"report.json",report)
+    write_json(final_path(args, root, "report.json"),report)
     progress("export", 1., "PLY and previews written")
-    print(f"Finished: {final/'character.ply'}",flush=True)
+    print(f"Finished: {final_path(args, root, 'character.ply')}",flush=True)
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input",type=Path,required=True)
     parser.add_argument("--output",type=Path,required=True)
+    parser.add_argument("--name", default="", help="Original image name used for final filenames")
+    parser.add_argument("--experiment", default="")
+    parser.add_argument("--source-image", default="")
     parser.add_argument("--approved-video",action="store_true")
+    parser.add_argument("--approval-basis", choices=["manual-review", "automatic-first"], default="manual-review")
     parser.add_argument("--stride",type=int,default=2)
     parser.add_argument("--max-height",type=int,default=1280)
     parser.add_argument("--iterations",type=int,default=15000)
-    parser.add_argument("--coverage", choices=["full", "partial"], default="full")
+    parser.add_argument("--coverage", choices=["auto", "full", "partial"], default="auto")
     parser.add_argument("--initialization", choices=["auto", "hull", "sparse"], default="auto")
     parser.add_argument("--stage",choices=["prepare","calibrate","train","all"],default="all")
     args = parser.parse_args()
-    if args.initialization == "auto":
-        args.initialization = "sparse" if args.coverage == "partial" else "hull"
     import importlib.util
     if importlib.util.find_spec("pycolmap") is None:
         parser.error("Video reconstruction requires pycolmap. Install it with .venv-i2g/Scripts/python.exe -m pip install pycolmap==4.2.1")
     if args.stride < 1 or args.max_height < 256 or args.iterations < 100:
         parser.error("Invalid stride, height or iteration count")
     root = args.output.resolve(); root.mkdir(parents=True,exist_ok=True)
+    write_json(root / "output_naming.json", {"name": args.name or args.input.stem, "experiment": args.experiment, "source_image": args.source_image})
     from i2g.log import setup_logging, get_logger
     from i2g.gpu_lock import acquire
     from i2g.comfy_client import ComfyClient
@@ -343,6 +368,10 @@ def main():
         if args.stage in ("all","calibrate","train"):
             progress("calibrate", 0., "Recovering cameras from foreground features")
             calibrate(root, args.coverage)
+            calibration = json.loads((root / "calibration.json").read_text())
+            args.coverage = calibration["coverage"]
+            if args.initialization == "auto" or calibration.get("fallback_reason"):
+                args.initialization = "sparse" if args.coverage == "partial" else "hull"
         if args.stage in ("all","train"):
             progress("train", 0., f"Initializing from {args.initialization} and starting training")
             fit(args,root)

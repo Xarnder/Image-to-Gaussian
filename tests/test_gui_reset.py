@@ -8,6 +8,11 @@ import splat_gui as gui
 
 
 class ResetTests(unittest.TestCase):
+    def setUp(self):
+        patcher = patch.object(gui, 'GENERATION', gui.VideoGeneration())
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_requires_confirmation(self):
         with patch.object(gui, 'STATE', gui.RunState()):
             for value in [None, False, 'true', 1]:

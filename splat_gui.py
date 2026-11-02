@@ -37,7 +37,58 @@ from batch_to_splat import (  # noqa: E402
 from image_to_splat import IMAGE_TYPES, PRESETS  # noqa: E402
 from i2g.paths import OUTPUT_DIR, existing_experiments, find_deliverable, safe_run_name  # noqa: E402
 from i2g.pipeline import STAGE_TITLES, STAGES  # noqa: E402
-from i2g.video_options import VIDEO_STAGES, video_command, video_output
+from i2g.video_options import VIDEO_STAGES, video_command, video_output, video_settings, archive_replaced_video
+from i2g.video_generation import VideoGeneration, default_prompt
+from i2g.generated_batch import GeneratedBatch
+
+LAUNCH_LOCK = threading.RLock()
+GENERATION = VideoGeneration(REPO_ROOT / "logs" / "gui-video-session.json", LAUNCH_LOCK)
+BATCH_GENERATION = GeneratedBatch(REPO_ROOT / "logs" / "gui-batch-session.json")
+
+
+def process_generated_image(body, cancel):
+    def handoff(candidate_id, basis):
+        if cancel.is_set():
+            return {"ok": False, "error": "Batch stopped before reconstruction."}
+        return select_generated(candidate_id, basis)
+    with LAUNCH_LOCK:
+        if cancel.is_set():
+            return {"ok": False, "error": "Batch stopped."}
+        GENERATION.start(body, handoff)
+    stopped = False
+    while True:
+        with LAUNCH_LOCK:
+            g = GENERATION.snapshot()
+            if cancel.is_set() and not stopped:
+                if g["active"]:
+                    GENERATION.stop()
+                if STATE.running:
+                    stop_run("now")
+                stopped = True
+            # The watcher marks generation done only after all process cleanup.
+            if not g["active"] and not STATE.running and g["status"] not in ("reconstructing", "starting", "generating"):
+                return {"ok": g["status"] == "done" and not cancel.is_set(), "error": g.get("message", "Processing failed"), "warning": STATE.snapshot().get("coverage_note", "")}
+        time.sleep(0.25)
+
+
+def select_generated(candidate_id, basis="manual-review", settings=None):
+    with LAUNCH_LOCK:
+        if STATE.running:
+            return {"ok": False, "error": "A reconstruction is already running."}
+        try:
+            if settings:
+                video_settings(settings)
+            if GENERATION.approve_early(candidate_id, lambda: select_generated(candidate_id, basis, settings)):
+                return {"ok": True, "pending": True}
+            body = GENERATION.selection(candidate_id, basis)
+            if settings:
+                body.update({k: settings[k] for k in ("video_preset", "coverage", "initialization", "iterations", "stride", "max_height") if k in settings})
+            result = start_run(body)
+            if result.get("ok"):
+                GENERATION.update(status="reconstructing", message="Selected video is being reconstructed.", selected=candidate_id)
+            return result
+        except (ValueError, OSError) as exc:
+            return {"ok": False, "error": str(exc)}
 
 
 def video_stage_plan():
@@ -491,7 +542,16 @@ class RunState:
             return {**empty, "run_name": run_name}
         work = OUTPUT_DIR / experiment / run_name / ("video" if self.mode == "video" else "v2")
         final = work / "final"
+        coverage_note = ""
+        if self.mode == "video" and (work / "calibration.json").is_file():
+            try:
+                calibration = json.loads((work / "calibration.json").read_text())
+                if calibration.get("fallback_reason"):
+                    coverage_note = "Incomplete reconstruction: full 360° alignment failed. Only aligned views were used; missing areas are not reconstructed."
+            except (OSError, ValueError):
+                pass
         return {
+            "coverage_note": coverage_note,
             "work_dir": str(work),
             "final_dir": str(final),
             "run_name": run_name,
@@ -516,14 +576,14 @@ class RunState:
         experiment = safe_run_name(self.experiment) if self.experiment else ""
         items: list[dict] = []
         if self.mode == "video":
-            work = video_output(experiment, source)
+            work = video_output(experiment, source, run_name)
             for path, item_id, label, kind in (
                 (source, "source_video", "Approved source video", "video"),
                 (work/"contact_sheet.jpg", "frames", "Extracted frames", "image"),
-                (work/"final"/"comparison.jpg", "comparison", "Video vs splat", "image"),
-                (work/"final"/"turntable.mp4", "turntable", "Gaussian turntable", "video"),
+                (find_deliverable(work/"final", run_name, "comparison.jpg", experiment), "comparison", "Video vs splat", "image"),
+                (find_deliverable(work/"final", run_name, "turntable.mp4", experiment), "turntable", "Gaussian turntable", "video"),
             ):
-                asset = _media_item(path if path.is_file() else None, item_id, label, kind)
+                asset = _media_item(path if path and path.is_file() else None, item_id, label, kind)
                 if asset:
                     items.append(asset)
             return {"name": run_name, "file": source.name, "active": items[-1]["id"] if items else None,
@@ -827,26 +887,25 @@ def _under_output(path: Path) -> bool:
         return False
 
 
-def reveal_under_output(path: Path) -> dict:
+def reveal_under_output(path: Path, *, select_file: bool = False) -> dict:
     """Open Explorer (or the OS file manager) at a folder under output/."""
     root = OUTPUT_DIR.resolve()
     path = path.resolve()
     if path != root and not _under_output(path):
         return {"ok": False, "error": "That folder is outside output\\."}
     shown = path
-    while shown != root and not shown.exists():
-        shown = shown.parent
-    if not shown.exists() and root.exists():
-        shown = root
-    if not shown.exists():
+    if not (shown.is_file() if select_file else shown.is_dir()):
         return {"ok": False, "error": f"That folder has not been created yet:\n{path}"}
     try:
         if sys.platform == "win32":
-            os.startfile(str(shown))  # noqa: S606
+            explorer = str(Path(os.environ.get("WINDIR", r"C:\Windows")) / "explorer.exe")
+            # Explorer's /select syntax must retain the comma before the quoted path.
+            args = f'"{explorer}" /select,"{shown}"' if select_file else [explorer, str(shown)]
+            subprocess.Popen(args)
         elif sys.platform == "darwin":
-            subprocess.Popen(["open", str(shown)])
+            subprocess.Popen(["open", "-R", str(shown)] if select_file else ["open", str(shown)])
         else:
-            subprocess.Popen(["xdg-open", str(shown)])
+            subprocess.Popen(["xdg-open", str(shown.parent if select_file else shown)])
     except OSError as exc:
         return {"ok": False, "error": f"Could not open the folder: {exc}"}
     return {"ok": True, "path": str(shown), "requested": str(path)}
@@ -875,9 +934,13 @@ def open_character_folder(body: dict) -> dict:
         }
     experiment = safe_run_name(experiment)
     run_name = safe_run_name(run_name)
+    if where == "combined":
+        return reveal_under_output(OUTPUT_DIR / experiment / 'final_ply')
     work = OUTPUT_DIR / experiment / run_name / ("video" if body.get("mode", STATE.mode) == "video" else "v2")
-    target = work / "final" if where == "final" else work
-    return reveal_under_output(target)
+    if body.get("work_dir"):
+        work = Path(str(body["work_dir"]))
+    target = (find_deliverable(work / "final", run_name, "character.ply", experiment) or work / "final" / "character.ply") if where == "ply" else work / "final" if where == "final" else work
+    return reveal_under_output(target, select_file=where == "ply")
 
 
 def preview(path: str, recursive: bool, mode: str = "") -> dict:
@@ -890,6 +953,8 @@ def preview(path: str, recursive: bool, mode: str = "") -> dict:
         return {"ok": True, "mode": "video", "count": 1, "path": str(where.resolve()),
                 "photos": [{"file": where.name, "name": where.stem, "path": str(where.resolve())}]}
     photos = find_photos(where, recursive)
+    if mode == "generate":
+        photos = [p for p in photos if p.suffix.lower() in IMAGE_TYPES]
     root = where if where.is_dir() else where.parent
     items = []
     for p in photos[:PREVIEW_CAP]:
@@ -1073,6 +1138,8 @@ def build_command(body: dict) -> tuple[list[str], str]:
             cmd.append("--recursive")
         if body.get("redo"):
             cmd.append("--redo")
+        if body.get("combined_ply") is False:
+            cmd.append("--separate-ply")
     if body.get("no_orbit"):
         cmd.append("--no_orbit")
     if body.get("debug"):
@@ -1290,6 +1357,15 @@ def pump_output(proc: subprocess.Popen) -> None:
 
 
 def reset_run(body: dict) -> dict:
+    with LAUNCH_LOCK:
+        return _reset_run(body)
+
+
+def _reset_run(body: dict) -> dict:
+    if BATCH_GENERATION.snapshot()["active"]:
+        return {"ok": False, "error": "Stop the folder batch before resetting."}
+    if GENERATION.snapshot()["active"]:
+        return {"ok": False, "error": "Stop video generation before resetting."}
     if body.get("confirmed") is not True:
         return {"ok": False, "error": "Slide to confirm reset."}
     with STATE.lock:
@@ -1303,16 +1379,27 @@ def reset_run(body: dict) -> dict:
         STATE.reset_stages()
         STATE.message = "Ready for a new video and project. Saved files are unchanged."
     snapshot = STATE.snapshot()
+    GENERATION.clear()
+    BATCH_GENERATION.clear()
     STATE.emit({"type": "reset", **snapshot})
     return {"ok": True, "state": snapshot}
 
 
 def start_run(body: dict) -> dict:
+    with LAUNCH_LOCK:
+        return _start_run(body)
+
+
+def _start_run(body: dict) -> dict:
+    if GENERATION.snapshot()["active"]:
+        return {"ok": False, "error": "Video generation is still running."}
     with STATE.lock:
         if STATE.running:
             return {"ok": False, "error": "a run is already in progress"}
     try:
         cmd, mode = build_command(body)
+        if mode == "video":
+            archive_replaced_video(body)
     except ValueError as exc:
         return {"ok": False, "error": str(exc)}
     path_obj = Path(body["input"]).expanduser().resolve()
@@ -1358,7 +1445,7 @@ def start_run(body: dict) -> dict:
         STATE.reset_stages()
         named = run_names(photos) if photos else {}
         STATE.photos = [{
-            "name": named.get(p, safe_run_name(p.stem)),
+            "name": safe_run_name(body["output_name"]) if mode == "video" and body.get("output_name") else named.get(p, safe_run_name(p.stem)),
             "file": photo_rel(p, root),
             "path": str(p.resolve()),
             "status": "queued",
@@ -1508,6 +1595,8 @@ def _watch(proc: subprocess.Popen) -> None:
         else:
             write_stop_record("failed", code)
     STATE.emit({"type": "done", "code": code, **STATE.snapshot()})
+    if GENERATION.snapshot().get("status") == "reconstructing":
+        GENERATION.update(status=STATE.status, message=("Gaussian splat finished. Videos remain available below." if code == 0 else "Reconstruction stopped or failed. Review the console; you can select another video or generate more."))
 
 
 def stop_run(how: str = "now") -> dict:
@@ -1777,6 +1866,12 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/status":
             self._json(200, STATE.snapshot())
             return
+        if path == "/api/generation":
+            self._json(200, GENERATION.snapshot() | {"batch": BATCH_GENERATION.snapshot()})
+            return
+        if path == "/api/generation/default-prompt":
+            self._json(200, {"prompt": default_prompt()})
+            return
         if path == "/api/experiments":
             self._json(200, {"experiments": existing_experiments()})
             return
@@ -1805,6 +1900,35 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError as exc:
             self._json(400, {"ok": False, "error": str(exc)})
             return
+        if path == "/api/generation/start":
+            with LAUNCH_LOCK:
+                try:
+                    if STATE.running or BATCH_GENERATION.snapshot()["active"]:
+                        raise ValueError("Wait for the current reconstruction to finish.")
+                    if body.get("generation_batch"):
+                        if GENERATION.snapshot()["active"]:
+                            raise ValueError("Wait for generation to finish.")
+                        folder = Path(body.get("input", "")).expanduser().resolve()
+                        ordered, _ = ordered_photos(folder, bool(body.get("recursive")), order_lines(body.get("order"))) if folder.is_dir() else ([], [])
+                        photos = [p for p in ordered if p.suffix.lower() in IMAGE_TYPES]
+                        result = BATCH_GENERATION.start(body, photos, process_generated_image)
+                    else:
+                        BATCH_GENERATION.clear()
+                        result = GENERATION.start(body, select_generated)
+                except (ValueError, TypeError, OSError) as exc:
+                    result = {"ok": False, "error": str(exc)}
+            self._json(200 if result.get("ok") else 400, result)
+            return
+        if path == "/api/generation/select":
+            if BATCH_GENERATION.snapshot()["active"]:
+                self._json(409, {"ok": False, "error": "The automated folder batch selects its videos automatically."})
+                return
+            result = select_generated(body.get("id"), settings=body.get("settings"))
+            self._json(200 if result.get("ok") else 400, result)
+            return
+        if path == "/api/generation/stop":
+            self._json(200, BATCH_GENERATION.stop(str(body.get("how", "now"))) if BATCH_GENERATION.snapshot()["active"] else GENERATION.stop())
+            return
         if path == "/api/browse":
             picked = browse(str(body.get("kind") or "file"))
             self._json(200, {"ok": True, "path": picked, "cancelled": picked is None})
@@ -1817,6 +1941,9 @@ class Handler(BaseHTTPRequestHandler):
             self._json(200 if result.get("ok") else 409, result)
             return
         if path == "/api/run":
+            if BATCH_GENERATION.snapshot()["active"]:
+                self._json(409, {"ok": False, "error": "Wait for the folder batch to finish."})
+                return
             try:
                 result = start_run(body)
             except Exception as exc:
@@ -1978,6 +2105,11 @@ def main(argv=None) -> int:
         print("\nStopping GUI.")
     finally:
         httpd.server_close()
+        if BATCH_GENERATION.snapshot()["active"]:
+            BATCH_GENERATION.stop()
+        if GENERATION.snapshot()["active"]:
+            GENERATION.stop()
+            GENERATION._cancel_prompt()
         if STATE.running:
             stop_run()
     return 0

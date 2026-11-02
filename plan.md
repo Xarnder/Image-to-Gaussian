@@ -1,5 +1,40 @@
 # Image-to-Gaussian v2: plan
 
+> **2026-11-02 batch delivery:** Folder batches default to moving completed PLYs
+> into `output/<experiment>/final_ply`, leaving Windows `.ply.lnk` shortcuts and
+> a `ply_location.json` lookup in each project final folder. The GUI checkbox
+> disables collection; restarting a batch relocates already-finished outputs
+> without inference. Both MiniMax and image-edit batches use this behavior.
+> Single-image runs retain their usual layout. `--separate-ply` disables collection
+> for the image-edit batch CLI. Verified move/restore/lookup/rollback and native
+> Windows shortcut creation with one real PLY only.
+
+> **2026-11-01 aspect-ratio fix:** MiniMax now sizes each source independently,
+> preserving the whole image with small edge padding to 32-pixel dimensions.
+> The old fixed-square ResolutionMaster + center-crop resize cut portrait heads/feet
+> before video generation. Candidate caches are versioned; legacy outputs with
+> mismatched source/frame aspect ratios are regenerated rather than skipped.
+> Verified the supplied portrait and landscape/square/tall fixtures through the
+> installed ComfyUI resize node with zero pixel changes after input preparation.
+
+> **2026-10-31: GUI front-image → MiniMax 360 video → splat works end to end.**
+> The GUI bundles `workflows/minimax_360.json`, preserving the supplied eye-lock
+> prompt and 360 LoRA. Default: generate five candidate videos, review/select one,
+> or generate more; optional automatic-first mode generates one and reconstructs it.
+> Automated folder batches now run one video and one separate splat per source image.
+> **2026-11-01:** MiniMax supports editable/saved batch order, subfolders,
+> skip-finished/rebuild, continue-on-failure and saved batch recovery. All final
+> outputs use `<original-image>-and-<experiment>-<kind>`; legacy video exports
+> with known image provenance have been renamed, and Explorer/preview links updated.
+> They require automatic-first selection or one candidate; multi-candidate review
+> remains single-image only. Queue, output naming, stop behavior and browser flow
+> are tested without repeating GPU inference for a multi-image batch.
+> The attached close-up portrait completed automatic mode with 62/62 cameras over
+> 359.96°, producing a verified 769,912-Gaussian PLY at
+> `output/portrait-generated-360/orbit_a716fb19f568/video/final/character.ply`.
+> This route uses only video frames for perspectives, not Qwen Image Edit or Wan.
+> See [docs/VIDEO_TO_SPLAT.md](docs/VIDEO_TO_SPLAT.md) for behavior and validation.
+
 > **2026-10-30: separate video-only pipeline completed.** `video_to_splat.py` takes a
 > manually approved orbit MP4 directly through foreground camera reconstruction and
 > Gaussian training, with no image-edit or generation model. The first MiniMax orbit

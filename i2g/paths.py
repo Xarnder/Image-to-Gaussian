@@ -70,6 +70,16 @@ def deliverable_path(output_dir: Path, run_name: str, kind: str, experiment: str
 
 def find_deliverable(output_dir: Path, run_name: str, kind: str, experiment: str = "") -> Path | None:
     """Prefixed file if it exists, else older names from earlier runs."""
+    metadata_path = output_dir.parent / "output_naming.json"
+    if metadata_path.is_file():
+        import json
+        try:
+            naming = json.loads(metadata_path.read_text(encoding="utf-8"))
+            named = deliverable_path(output_dir, naming["name"], kind, naming.get("experiment", experiment))
+            if named.is_file():
+                return named
+        except (OSError, ValueError, KeyError):
+            pass
     for candidate in (
         deliverable_path(output_dir, run_name, kind, experiment),
         output_dir / f"{safe_run_name(run_name)}-{kind}",
@@ -77,6 +87,9 @@ def find_deliverable(output_dir: Path, run_name: str, kind: str, experiment: str
     ):
         if candidate.exists():
             return candidate
+    if kind == "character.ply":
+        from .batch_outputs import linked_ply
+        return linked_ply(output_dir)
     return None
 
 

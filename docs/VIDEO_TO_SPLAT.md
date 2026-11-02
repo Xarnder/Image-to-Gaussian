@@ -1,8 +1,83 @@
 # Approved orbit video to Gaussian splat
 
-This is a separate video-only entry point. It does not run Qwen, Wan, MiniMax,
+## Front image to generated 360 video
+
+The GUI now defaults to **Front image → 360 video → Gaussian splat**. Choose one
+front image and an experiment name. **Review candidates** generates five videos by
+default (configurable from 1 to 20 per batch), then pauses. Play the candidate
+videos, check blinking/eye motion and the complete orbit, and choose **Approve this
+video & reconstruct**. **Generate more candidates** appends fresh seeds and retains
+earlier options. Reconstruction settings remain editable before approval.
+
+Alternatively choose **Generate one and continue automatically**. This generates
+one new video and sends it directly to frame extraction, camera reconstruction and
+Gaussian training. It records `automatic-first` selection, rather than claiming a
+person reviewed the video. Camera quality gates still apply; automatic selection
+does not promise that the generated orbit is geometrically consistent.
+
+Generation uses the versioned `workflows/minimax_360.json`, copied from
+`Xander 360 View Minimax H3 Workflow.json`. It preserves the exact eye-lock prompt,
+MiniMax H3 model, `minimax_h3_flf2v_lora_v1.safetensors` at strength 1, sampler,
+28 steps, resolution, five-second duration calculation, and identical first/last
+frame wiring. Only input image, random seed and output filename are substituted.
+Disabled/bypassed nodes are respected; note text is not executable configuration.
+The Qwen3-VL file in this workflow is MiniMax's text encoder, not Qwen Image Edit.
+There is no image-edit, Wan, SAM body, or synthesized still-view stage on this route.
+
+ComfyUI starts automatically if necessary. Generation is serial, shares the GPU
+lock with training, and unloads models before reconstruction. Stop retains completed
+videos and cancels only this generation's queued/running prompt. Refreshing the
+browser restores the current batch. Saved candidates can also be restored after
+restarting the GUI; an interrupted external ComfyUI job must finish or be stopped
+before launching another batch. Reset clears the GUI session, not saved files.
+
+Candidates and their exact API graphs, seeds, source/workflow hashes and selection
+record are in `output/<experiment>/<image>/orbit_candidates/<fingerprint>/`.
+Selected-video reconstruction is in `output/<experiment>/<candidate>/video/final/`.
+Changing the source image or bundled workflow creates a separate candidate set.
+The existing **360 video** import route remains available.
+
+Close-up portraits sometimes fail full-360 camera registration even if the video
+looks plausible. Full coverage is still the default; the partial recipe is an
+explicit option and produces only the recovered front/side arc.
+
+### Portrait generation-to-splat validation — 2026-10-31
+
+Launched the attached `Test-Close_Head-Shot.png` through the real browser GUI in
+automatic-first mode. MiniMax generated `orbit_a716fb19f568.mp4`, seed
+`97082330915038`: 124 frames at 24 fps, 1248×1248 pixels. The bundled workflow is
+byte-identical to the supplied file (SHA256
+`6c30fc5c1d27de38785848107df0148f2ed9c3ddb62a0c2640805279bcf10ead`).
+All 62 sampled frames registered: 29,561 sparse points, 0.6893 px mean
+reprojection error, 359.9577° orbit span and 7.1263° largest gap. No partial
+coverage fallback was used.
+
+The standard 15,000-step hull run completed, including evaluation/previews, in
+1,015.2 seconds with 4.45 GiB peak allocated VRAM. Held-out foreground PSNR was
+29.1063 dB. The final PLY contains 769,912 Gaussians and is 190,939,787 bytes.
+`tools/verify_video_export.py` reloaded it, confirmed finite parameters and exact
+agreement with the normalized checkpoint, then rendered eight observed views.
+The H.264 preview contains 144 frames. Front, profiles and back are coherent;
+fine hair is softer, and the uniform turntable reveals small artifacts at the
+cropped shoulder edges, which are weakly constrained by this head-shot video.
+Scores measure fit to generated frames, not unseen real-world anatomy.
+
+Artifacts: `output/portrait-generated-360/orbit_a716fb19f568/video/final/`, including
+`character.ply`, `turntable.mp4`, `verified_comparison.jpg`, `preview_8_angles.jpg`,
+`report.json` and `verification.json`. Source video, API graph and selection record
+are under the portrait's `orbit_candidates/994465d18734/` directory.
+
+23 regression tests pass. A separate, explicitly labeled browser fixture verified
+five playable candidate cards, selecting the third with edited training settings,
+appending five more without losing earlier options, and reset behavior. Those
+fixture videos reuse an existing clip; the real GPU end-to-end test generated one
+new portrait video. The real MP4 was also played in the browser, and live stage
+transitions were observed through completion. The explicit `automatic-first`
+approval flag was additionally checked against the cached prepared video.
+
+The `video_to_splat.py` reconstruction entry point remains video-only. It does not run Qwen, Wan, MiniMax,
 SAM 3D Body, image editing, view generation, or the older image pipeline.
-The source is an already generated, manually approved MP4.
+Its source is an already generated MP4, selected by manual review or the GUI's explicit automatic-first policy.
 
 For the complete experiment and explanation, see
 [MiniMax orbit video to Gaussian splat](D:/Image-to-Gaussian/next-stage-research/docs/minimax_orbit_video_to_gaussian_results.md).
@@ -216,3 +291,26 @@ expose the flags through their video help; all 13 routing/coverage/menu tests pa
 
 ### Reset for another video/project
 Click Reset for new project, then slide fully right and release. Cancel or an incomplete slide preserves the form. Reset clears video, project, approval, preview, console and progress while retaining recipe settings and all saved files. Active runs cannot be reset. Browser checks and all 16 regression tests passed.
+### Custom MiniMax H3 prompt
+
+Enable **Custom MiniMax H3 prompt** to edit the exact prompt loaded from the bundled working workflow. **Restore working prompt** resets the editor. With the toggle off, the unchanged workflow prompt is used regardless of editor contents. Edits apply to every candidate and every image in an automated folder batch. The effective prompt is saved in generation metadata and each submitted API graph; prompt changes use a separate candidate directory. Model, LoRA and sampling settings remain unchanged.
+
+### Early candidate approval
+
+The candidate count is a maximum. While a review batch is running, approve any completed video with **Approve this video, cancel rest & reconstruct**. The app interrupts its current ComfyUI job, skips the remaining candidates, waits for that job to stop, releases generation resources, and starts reconstruction from the selected video. Completed candidates remain saved. Unrelated ComfyUI jobs are not cancelled.
+
+### Automated folder batches
+
+The GUI now defaults to **Automatic — aim for 360°, skip unusable views**. It first applies the full-orbit checks, then falls back to the partial checks if coverage is incomplete. Partial fallback still requires at least 12 aligned cameras, 1,000 sparse points and a 60° observed arc. Fallback uses sparse initialization, limits the preview to the observed arc, and records the reason in calibration/report JSON and an incomplete-result notice in the GUI (including per-image batch results). It does not recover from unrelated decoding, GPU, or training failures. Explicit CLI `--coverage full` remains strict; `--coverage auto` enables fallback.
+
+Under Front image → 360 video → Gaussian splat, choose **Folder of front-facing images — automated batch**. This selects automatic-first mode. Review mode is also accepted if the candidate count is exactly one; the single candidate is then accepted automatically for every image. Multi-candidate manual review is rejected for folder batches.
+
+PNG, JPG, JPEG, WebP, BMP and TIFF images run in the chosen order. Drag rows or use Alt+Up/Alt+Down; A–Z resets the list. Include subfolders is optional. Order is saved and restored. Each image completes video generation, frame extraction, camera recovery, training and export before the next starts. Outputs are saved separately as `output/<experiment>/<image-name>/video/final/<image-name>-and-<experiment>-character.ply`; ambiguous image names receive a short hash suffix. The GUI shows each image's status and a Show PLY in Explorer button for completed results. `generated_batch.json` in the experiment folder records the source-to-output mapping and errors.
+
+Stop after this one finishes the current image, including reconstruction. Stop now cancels the active stage and prevents subsequent images from starting. Failed images are recorded and the remaining images continue. Start again to retry failures or continue after stopping; finished splats are skipped by default. Rebuild finished ones preserves previous work under a video_previous_<timestamp> folder. The saved batch and order are restored after restarting the GUI, but execution resumes only when Start is clicked.
+
+### Final filenames and shared GUI features
+
+All video final deliverables use the original image name and experiment, matching the image-edit pipeline: `<image>-and-<experiment>-character.ply`, `-turntable.mp4`, `-comparison.jpg`, `-splats.pt`, and `-report.json`. Source provenance is recorded in `output_naming.json`. Duplicate image stems receive unique suffixes. Preview and Explorer links accept both new and legacy names. `tools/name_video_outputs.py --apply` repairs legacy video filenames only when the original image is known from generation records, and refuses destination collisions.
+
+MiniMax folder mode shares image ordering, saved order, subfolder discovery, duplicate-name handling, skip-finished/rebuild, stop-now/stop-after-current, per-image status, continue-on-failure, reset, previews, console controls, and output reveal behavior. Image-edit-specific stages, presets and flags remain confined to that pipeline; MiniMax uses its own prompt, video selection and reconstruction controls.

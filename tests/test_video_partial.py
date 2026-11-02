@@ -22,6 +22,30 @@ class PartialVideoTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, '46/62'):
             video.check_coverage(self.summary(), 'full')
 
+    def test_automatic_falls_back_only_when_partial_is_usable(self):
+        summary = video.check_coverage(self.summary(), 'auto')
+        self.assertEqual(summary['coverage'], 'partial')
+        self.assertIn('46/62', summary['fallback_reason'])
+        self.assertIn('missing areas', video.coverage_message(summary))
+        for change in [dict(registered=11), dict(points=999), dict(largest_gap_degrees=310)]:
+            with self.assertRaises(RuntimeError):
+                video.check_coverage(self.summary() | change, 'auto')
+
+    def test_automatic_keeps_full_orbit_when_valid(self):
+        summary = video.check_coverage(self.summary() | dict(registered=62, largest_gap_degrees=8), 'auto')
+        self.assertEqual(summary['coverage'], 'full')
+        self.assertNotIn('fallback_reason', summary)
+
+    def test_automatic_uses_cached_cameras_and_records_fallback(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            model = root / 'sparse'; model.mkdir()
+            (root / 'calibration_attempt.json').write_text(json.dumps(self.summary() | dict(model=str(model))))
+            video.calibrate(root, 'auto')
+            saved = json.loads((root / 'calibration.json').read_text())
+            self.assertEqual(saved['coverage'], 'partial')
+            self.assertIn('fallback_reason', saved)
+
     def test_partial_accepts_verified_arc_but_rejects_degenerate_data(self):
         self.assertEqual(video.check_coverage(self.summary(), 'partial')['covered_arc_degrees'], 221)
         for change in [dict(registered=11), dict(points=999), dict(largest_gap_degrees=310)]:

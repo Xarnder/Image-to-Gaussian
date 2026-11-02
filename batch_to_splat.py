@@ -188,6 +188,14 @@ def run_names(photos: list[Path]) -> dict[Path, str]:
     for p in photos:
         name = p.stem if stems[p.stem.lower()] == 1 else f"{p.parent.name}_{p.stem}"
         names[p] = safe_run_name(name)
+    # Same-stem files with different extensions (or sanitized names) can still collide.
+    import hashlib
+    counts = {}
+    for name in names.values():
+        counts[name.casefold()] = counts.get(name.casefold(), 0) + 1
+    for p, name in list(names.items()):
+        if counts[name.casefold()] > 1:
+            names[p] = name + "_" + hashlib.sha256(str(p.resolve()).encode()).hexdigest()[:10]
     return names
 
 
@@ -220,6 +228,7 @@ def main(argv=None) -> int:
     ap.add_argument("--preset", choices=sorted(PRESETS), default="standard",
                     help="quality preset for every photo (default: standard, the best pipeline)")
     ap.add_argument("--recursive", action="store_true", help="also take photos from subfolders")
+    ap.add_argument("--separate-ply", action="store_true", help="keep final PLY files in individual project folders")
     ap.add_argument("--order", type=Path,
                     help="text file of photos in the order to build them (relative to --input or absolute, "
                          "one per line). Photos not listed stay at the end. Default is A–Z")
@@ -265,8 +274,11 @@ def main(argv=None) -> int:
     plan = []
     for photo in photos:
         work = base / names[photo] / "v2"
-        done = find_deliverable(work / "final", names[photo], "character.ply",
-                                experiment=experiment) is not None
+        from i2g.batch_outputs import organize_ply
+        existing = find_deliverable(work / "final", names[photo], "character.ply", experiment=experiment)
+        done = existing is not None
+        if done and not rerunning and not args.dry_run:
+            organize_ply(existing, work / 'final', base / 'final_ply', not args.separate_ply)
         plan.append({"photo": str(photo), "name": names[photo], "work": str(work),
                      "status": "done" if (done and not rerunning) else "todo"})
     todo = [p for p in plan if p["status"] == "todo"]
@@ -334,6 +346,8 @@ def main(argv=None) -> int:
         ply = find_deliverable(Path(item["work"]) / "final", item["name"], "character.ply",
                                experiment=experiment)
         if ply is not None:
+            if code == 0:
+                ply = organize_ply(ply, Path(item['work']) / 'final', base / 'final_ply', not args.separate_ply)
             item["ply"] = str(ply)
             item["ply_mb"] = round(ply.stat().st_size / 1024 ** 2, 1)
         if interrupted:

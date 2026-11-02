@@ -57,7 +57,7 @@ def ensure_node_link(comfy_root: Path) -> bool:
 
 
 def start_comfy(comfy_root: Path, url: str, logs_dir: Path, sage: bool, timeout_s: float,
-                make_bar=None) -> subprocess.Popen:
+                make_bar=None, stop_event=None) -> subprocess.Popen:
     """Start ComfyUI hidden and wait until its API answers. Returns the process."""
     python = comfy_root / "python_embeded" / "python.exe"
     main = comfy_root / "ComfyUI" / "main.py"
@@ -96,6 +96,9 @@ def start_comfy(comfy_root: Path, url: str, logs_dir: Path, sage: bool, timeout_
     start = time.monotonic()
     try:
         while time.monotonic() - start < timeout_s:
+            if stop_event is not None and stop_event.is_set():
+                proc.terminate()
+                raise PipelineError("ComfyUI startup cancelled.")
             if proc.poll() is not None:
                 tail = _tail(log_path, 25)
                 raise PipelineError(f"ComfyUI exited during startup (exit code {proc.returncode}).\n{tail}",

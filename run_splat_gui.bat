@@ -1,7 +1,8 @@
 @echo off
 rem ===========================================================================================
-rem  Image-to-Gaussian GUI: choose Image edit (photo/folder) or 360 video (MP4) in the browser, watch progress, run the
-rem  same pipeline as run_image_to_splat.bat / run_batch_to_splat.bat.
+rem  Image-to-Gaussian GUI: generate 360 video candidates from one front image,
+rem  approve a candidate (or automatically use the first), then reconstruct a splat.
+rem  Existing Image edit and imported 360 video methods remain available.
 rem
 rem  Double-click this file. A browser tab opens at http://127.0.0.1:8765/
 rem  Leave this window open while you work. Close it (or Ctrl-C) to stop the UI.
