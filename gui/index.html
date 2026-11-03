@@ -253,6 +253,7 @@
       display: none; margin-top: 8px; padding: 8px 10px; border-radius: 6px;
       background: #3a2e14; border: 1px solid var(--warn); color: var(--warn); font-size: 13px;
     }
+    button.stop-after[aria-pressed="true"] {opacity:1;background:#775c19;color:white}
     .stop-banner.show { display: block; }
     .stop-banner.now { background: #3a1418; border-color: var(--bad); color: #f0b4b8; }
     .hint { color: var(--muted); font-size: 12px; margin-top: 8px; }
@@ -438,8 +439,8 @@
     .batch-results-table {width:100%;border-collapse:collapse;text-align:left;font-size:14px}
     .batch-results-table th {font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);padding:12px;border-bottom:2px solid #555}
     .batch-results-table td {padding:14px 12px;border-bottom:1px solid #5555;vertical-align:top}
-    .batch-results-table td:first-child {min-width:190px;overflow-wrap:anywhere;max-width:320px}
-    .batch-results-table td:nth-child(n+4) {white-space:nowrap}
+    .batch-results-table td:nth-child(2) {min-width:190px;overflow-wrap:anywhere;max-width:320px}
+    .batch-results-table td:nth-child(n+5) {white-space:nowrap}
     .batch-results-table button {padding:6px 9px;margin:0 5px 6px 0;font-size:12px}
     .batch-status {display:inline-block;border-radius:20px;padding:4px 10px;font-weight:600;background:#414955;color:#fff;white-space:nowrap}
     .batch-status.done,.batch-status.skipped {background:#164e37;color:#bcf7d5}
@@ -447,11 +448,47 @@
     .batch-status.failed {background:#702c32;color:#ffe1e4}
     .batch-status.stopped {background:#624820;color:#ffe6b0}
     .batch-note {display:block;max-width:280px;font-size:12px;margin-top:6px;overflow-wrap:anywhere}
+    
+    .batch-results-table .batch-thumb {display:block;padding:0;margin:0;width:clamp(160px,24vw,320px);overflow:hidden}
+    .batch-thumb img {display:block;width:100%;height:clamp(200px,30vw,400px);object-fit:contain}
+    #batch-viewer {position:fixed;inset:0;margin:0;width:100%;height:100%;max-width:none;max-height:none;box-sizing:border-box;border:0;padding:0;background:#101215;color:#fff}
+    #batch-viewer[open] {display:grid;grid-template-rows:minmax(0,1fr) auto}
+    #batch-photo {width:100%;height:100%;object-fit:contain}
+    #batch-viewer button {position:absolute;background:#20242bed;color:white;padding:.6em 1em}
+    #batch-prev,#batch-next {top:45%;font-size:22px}
+    #batch-prev {left:12px} #batch-next,#batch-close {right:12px} #batch-close {top:12px}
+    #batch-footer {display:flex;gap:6px 16px;align-items:center;flex-wrap:wrap;padding:7px 14px;background:#23272d;font-size:13px}
+    #batch-footer strong {overflow-wrap:anywhere}
+    #batch-footer .batch-status {padding:2px 8px}
+    #batch-additions {margin:12px 0;padding:12px;border:1px solid var(--accent);border-radius:8px;background:var(--panel)}
+    #batch-additions summary {cursor:pointer;color:var(--accent);padding:8px}
+    #batch-additions button,#jump-additions {min-height:44px}
+    .batch-tools {display:flex;align-items:end;flex-wrap:wrap;gap:10px}
+    .batch-tools label {display:grid;gap:4px;margin:0}
+    .batch-tools input,.batch-tools select {width:auto;max-width:100%}
+    #batch-photo {touch-action:pan-y pinch-zoom}
+    @media (max-width:700px) {
+      .batch-table-scroll {overflow:visible}
+      .batch-results-table,.batch-results-table tbody {display:block}
+      .batch-results-table thead {position:absolute;width:1px;height:1px;clip-path:inset(50%);overflow:hidden}
+      .batch-results-table tr {display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);border:1px solid #8886;border-radius:12px;margin-bottom:12px;padding:10px;gap:5px}
+      .batch-results-table tr[hidden] {display:none}
+      .batch-results-table td {border:0;padding:3px;min-width:0}
+      .batch-results-table td:nth-child(2) {min-width:0;max-width:none;font-weight:600}
+      .batch-results-table td:nth-child(-n+4) {grid-column:1/-1}
+      .batch-results-table td:nth-child(n+5) {white-space:normal}
+      .batch-results-table td:nth-child(n+5)::before {content:attr(data-label);display:block;font-size:12px;opacity:.75}
+      .batch-results-table .batch-thumb {width:100%;margin:0}
+      .batch-thumb img {height:clamp(180px,58vw,360px)}
+      .batch-tools button,.batch-results-table button,#batch-viewer button,#staged-images button {min-height:44px;min-width:44px}
+      #batch-footer {max-height:30vh;overflow:auto;padding-bottom:max(8px,env(safe-area-inset-bottom))}
+    }
     </style>
 </head>
 <body>
   <header>
     <h1>Image-to-Gaussian</h1>
+    <a href="#splat-history" style="float:right;color:var(--accent)" onclick="document.getElementById('splat-history').open=true">View splat history</a>
     <div class="sub">From one photo or an approved orbit video to a static Gaussian splat.</div>
   </header>
   <div class="progress-wrap">
@@ -483,6 +520,32 @@
       <div class="label">Status</div>
       <div id="current">Waiting</div>
     </div>
+    <details id="batch-additions" hidden>
+      <summary><strong>＋ Add images to this running queue</strong></summary>
+      <p>The current character keeps processing. New images will run automatically after the last queued image.</p>
+      <strong>1. Choose images</strong>
+      <div><button id="stage-file" type="button">Choose an image…</button>
+      <button id="stage-folder" type="button">Choose a folder…</button>
+      <label><input type="checkbox" id="stage-recursive"> Include subfolders</label></div>
+      <p><strong>2. Review the order and add to queue</strong></p>
+      <span id="stage-count">Choose an image or folder to get started.</span>
+      <ol id="staged-images"></ol>
+      <button id="append-staged" class="primary" type="button" disabled>Add to end of queue</button>
+      <span id="stage-feedback" role="status"></span>
+    </details>
+    <section>
+      <details id="rate-panel" open>
+        <summary><strong>Gaussian training speed</strong></summary>
+        <p id="rate-summary" class="hint">Waiting for training samples…</p>
+        <canvas id="rate-chart" style="display:block;width:100%;height:clamp(155px,22vw,240px)" role="img" aria-label="Training steps per second over elapsed time"></canvas>
+      </details>
+      <label><input type="checkbox" id="live-training"> Show live Gaussian training preview</label>
+      <p class="hint">Updating this preview can slow training. Turn it off to stop capturing frames.</p>
+      <figure id="live-training-panel" hidden>
+        <img id="live-training-image" hidden alt="Current Gaussian splat from the sampled training camera" style="max-width:100%;max-height:55vh">
+        <figcaption id="live-training-caption">Waiting for Gaussian training…</figcaption>
+      </figure>
+    </section>
     <div class="folder-row">
       <div class="folder-copy">
         <p class="folder-note">The final result is in the <code>final</code> subfolder of this character's working directory.</p>
@@ -501,13 +564,14 @@
     <p id="coverage-note" role="status" hidden></p>
     <div id="reset-confirm" hidden style="padding:16px; margin-top:12px; border:1px solid #546174; border-radius:10px; background:#1b222a">
       <strong>Reset for a new video and project?</strong>
-      <p>Clears the current video, project name, progress, preview and console. Keeps your recipe settings and all saved files.</p>
-      <label for="reset-slider">Slide all the way right, then release to reset</label>
-      <input id="reset-slider" type="range" min="0" max="100" value="0" step="1" style="width:100%; accent-color:#36ce8b" aria-valuetext="Slide to confirm reset">
+      <p>This clears the current session. Your splat history, cached thumbnails, saved PLY files and recipe settings are kept.</p>
+      <label for="reset-phrase">Type <strong>Confirm Reset</strong> to enable the reset button.</label>
+      <input id="reset-phrase" type="text" autocomplete="off" spellcheck="false">
+      <button type="button" id="reset-submit" disabled>Reset session</button>
       <button type="button" id="reset-cancel">Cancel</button>
       <span id="reset-error" role="alert"></span>
     </div>
-    <div class="stop-banner" id="stop-banner"></div>
+    <div class="stop-banner" id="stop-banner" role="status"></div>
     <div class="link-banner" id="link-banner">Lost connection to the GUI server. Trying to reconnect…</div>
     <div class="fail-panel" id="fail-panel" hidden>
       <div class="fail-kicker" id="fail-kicker">Something went wrong</div>
@@ -557,7 +621,7 @@
           <option value="single">One front-facing image</option>
           <option value="folder">Folder of front-facing images — automated batch</option>
         </select>
-        <p id="generation-batch-hint" class="hint" hidden>Each image gets one video and its own Gaussian splat, without review. Requires automatic first-video selection or exactly one candidate. Drag the image list to choose processing order. Finished splats are skipped; failed images are recorded and the batch continues.</p>
+        <p id="generation-batch-hint" class="hint" hidden>Each image gets one video and its own Gaussian splat, without review. Requires automatic first-video selection or exactly one candidate. Drag the image list to choose processing order. While running, use “Add images to this running queue” beneath Status to add more. Finished splats are skipped; failed images are recorded and the batch continues.</p>
         <div id="generation-batch-options" hidden>
           <label><input type="checkbox" id="generation-recursive"> Include subfolders</label>
           <label><input type="checkbox" id="generation-redo"> Rebuild finished ones</label>
@@ -676,7 +740,15 @@
       <h2>Automated batch</h2>
       <p id="generated-batch-status" role="status"></p>
       <p class="hint">Times use this computer’s local time (12-hour AM/PM). Dates are shown for runs spanning multiple days. Older results may not have recorded timings.</p>
-      <div class="batch-table-scroll"><table class="batch-results-table"><thead><tr><th scope="col">Original image</th><th scope="col">Status</th><th scope="col">Project / output</th><th scope="col">Started</th><th scope="col">Finished</th><th scope="col">Duration</th></tr></thead><tbody id="generated-batch-items"></tbody></table></div>
+      <button type="button" id="jump-additions" hidden>Add images to running queue ↑</button>
+      <div class="batch-tools">
+        <label>Find an image<input type="search" id="batch-find" placeholder="Filename or project name"></label>
+        <label>Show<select id="batch-filter"><option value="all">All images</option><option value="running">Processing now</option><option value="queued">Queued</option><option value="finished">Finished</option><option value="attention">Needs attention</option></select></label>
+        <button type="button" id="batch-jump">View current image</button>
+        <button type="button" id="batch-clear" hidden>Clear filters</button>
+      </div>
+      <p id="batch-counts" class="hint" role="status"></p>
+      <div class="batch-table-scroll"><table class="batch-results-table"><thead><tr><th scope="col">Preview</th><th scope="col">Original image</th><th scope="col">Status</th><th scope="col">Project / output</th><th scope="col">Started</th><th scope="col">Finished</th><th scope="col">Duration</th></tr></thead><tbody id="generated-batch-items"></tbody></table></div>
     </section>
     <section id="viewer-wrap">
       <div class="viewer-head">
@@ -721,6 +793,23 @@
       <pre id="console"></pre>
     </section>
   </main>
+  <section style="margin:16px">
+    <details id="splat-history">
+      <summary><strong>Gaussian splat history</strong></summary>
+      <p>Browse completed local splats across projects and sessions.</p>
+      <label>Find a splat <input type="search" id="history-find" placeholder="Image or experiment name"></label>
+      <button id="history-refresh" type="button">Refresh history</button>
+      <p id="history-message" role="status"></p>
+      <div id="history-results" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,230px),1fr));gap:12px"></div>
+    </details>
+  </section>
+  <dialog id="batch-viewer" aria-label="Batch image viewer">
+    <img id="batch-photo" alt="">
+    <button type="button" id="batch-prev" aria-label="Previous batch image">‹</button>
+    <button type="button" id="batch-next" aria-label="Next batch image">›</button>
+    <button type="button" id="batch-close" aria-label="Close batch viewer">Close ×</button>
+    <footer id="batch-footer"></footer>
+  </dialog>
   <div id="lightbox" hidden role="dialog" aria-modal="true" aria-label="Preview full screen">
     <div class="lightbox-bar">
       <span class="hint" id="lightbox-caption"></span>
@@ -1497,6 +1586,114 @@
       });
     }
 
+    let historyItems = [];
+    function showHistory() {
+      const query = $("history-find").value.trim().toLowerCase();
+      const results = $("history-results");
+      results.replaceChildren();
+      const matches = historyItems.filter(item => (item.name+" "+item.experiment).toLowerCase().includes(query));
+      $("history-message").textContent = matches.length+" of "+historyItems.length+" saved splats";
+      for (const item of matches) {
+        const card = document.createElement("article");
+        card.style.cssText="padding:12px;border:1px solid #8886;border-radius:10px;overflow-wrap:anywhere";
+        if (item.thumbnail) {
+          const image=document.createElement("img");
+          image.loading="lazy"; image.alt=item.name; image.src=item.thumbnail;
+          image.style.cssText="width:100%;height:152px;object-fit:contain";card.append(image);
+        } else {
+          const empty=document.createElement("p");empty.textContent="Thumbnail unavailable";card.append(empty);
+        }
+        const title=document.createElement("strong");title.textContent=item.name;
+        const info=document.createElement("p");info.textContent=item.experiment+" · "+new Date(item.created*1000).toLocaleString();
+        const button=document.createElement("button");button.type="button";button.disabled=!item.available;
+        button.textContent=item.available?"Show PLY in Explorer":"PLY unavailable";
+        button.onclick=async()=>{const result=await post("/api/history/reveal",{id:item.id});if(!result.ok)$("history-message").textContent=result.error;};
+        card.append(document.createElement("br"),title,info,button);results.append(card);
+      }
+    }
+    async function loadHistory() {
+      if ($("history-refresh").disabled) return;
+      $("history-refresh").disabled=true; $("history-message").textContent="Checking saved splats…";
+      try {
+        const result=await fetch("/api/splat-history",{cache:"no-store"}).then(response=>response.json());
+        if(!result.items) throw Error(result.error || "History unavailable");
+        historyItems=result.items;showHistory();
+      } catch(error) { $("history-message").textContent=error.message; }
+      finally { $("history-refresh").disabled=false; }
+    }
+    $("splat-history").ontoggle=()=>{if($("splat-history").open)loadHistory();};
+    $("history-refresh").onclick=loadHistory;
+    $("history-find").oninput=showHistory;
+    const rateChart = $("rate-chart");
+    let trainingRates = [], fetchingRate = false;
+    function drawTrainingRate() {
+      const width = rateChart.clientWidth, height = rateChart.clientHeight;
+      if (!width || !height) return;
+      const ratio = window.devicePixelRatio || 1;
+      rateChart.width = width * ratio; rateChart.height = height * ratio;
+      const ctx = rateChart.getContext("2d");
+      ctx.scale(ratio,ratio);
+      const left=46, right=width-16, top=16, bottom=height-34;
+      const end=Math.max(1,trainingRates.at(-1)?.[0] || 0);
+      const peak=Math.max(1,...trainingRates.map(sample=>sample[2]));
+      ctx.font="12px system-ui"; ctx.fillStyle=getComputedStyle(rateChart).color;
+      for(let i=0;i<=4;i++) {
+        const y=bottom-(bottom-top)*i/4;
+        ctx.strokeStyle="#8885"; ctx.beginPath();ctx.moveTo(left,y);ctx.lineTo(right,y);ctx.stroke();
+        ctx.fillText((peak*i/4).toFixed(1),3,y+4);
+      }
+      ctx.fillText("steps/s",2,12);ctx.fillText("0:00",left,bottom+20);
+      const elapsed=Math.floor(end);
+      const label=Math.floor(elapsed/60)+":"+String(elapsed%60).padStart(2,"0")+" elapsed";
+      ctx.fillText(label,right-ctx.measureText(label).width,bottom+20);
+      ctx.beginPath();ctx.lineWidth=2;ctx.strokeStyle="#52b9f1";
+      trainingRates.forEach(([seconds,step,rate],index)=>{
+        const x=left+(right-left)*seconds/end,y=bottom-(bottom-top)*rate/peak;
+        if(index===0)ctx.moveTo(x,y);else ctx.lineTo(x,y);
+      });
+      ctx.stroke();
+      if(trainingRates.length){const last=trainingRates.at(-1);ctx.beginPath();ctx.fillStyle="#52b9f1";
+        ctx.arc(right,bottom-(bottom-top)*last[2]/peak,3,0,2*Math.PI);ctx.fill();}
+    }
+    async function refreshTrainingRate() {
+      if(fetchingRate || document.hidden || !$("rate-panel").open)return;
+      fetchingRate=true;
+      try {
+        const result=await fetch("/api/training-rate",{cache:"no-store"}).then(r=>r.json());
+        trainingRates=result.samples || [];
+        const last=trainingRates.at(-1);
+        $("rate-summary").textContent=last ? result.name+" · "+last[2].toFixed(2)+" steps/s · Step "+last[1].toLocaleString()+" · Average "+(last[1]/Math.max(last[0],0.001)).toFixed(2)+" steps/s" : "Waiting for training samples…";
+        drawTrainingRate();
+      } catch { /* Retry on the next update. */ }
+      finally {fetchingRate=false;}
+    }
+    new ResizeObserver(drawTrainingRate).observe(rateChart);
+    $("rate-panel").addEventListener("toggle",refreshTrainingRate);
+    setInterval(refreshTrainingRate,3000);
+    refreshTrainingRate();
+    let previewBusy = false;
+    async function refreshTrainingPreview() {
+      if (previewBusy || !$("live-training").checked || document.hidden) return;
+      previewBusy = true;
+      try {
+        const result = await post("/api/training-preview", {enabled:true});
+        if (!$("live-training").checked || document.hidden) return;
+        const img = $("live-training-image");
+        img.hidden = !result.url;
+        if (result.url && img.getAttribute("src") !== result.url) img.src = result.url;
+        $("live-training-caption").textContent = result.url ? "Current training view · refreshes about every 5 seconds" : "Waiting for Gaussian training…";
+      } finally { previewBusy = false; }
+    }
+    $("live-training").onchange = () => {
+      const enabled = $("live-training").checked;
+      $("live-training-panel").hidden = !enabled;
+      if (enabled) refreshTrainingPreview();
+      else {
+        $("live-training-image").hidden = true;
+        post("/api/training-preview", {enabled:false});
+      }
+    };
+    setInterval(refreshTrainingPreview, 3000);
     function applyStatus(s) {
       if (!s) return;
       lastStatus = s;
@@ -1510,6 +1707,11 @@
       const stopMode = batchActive ? generationState.batch.stop_mode : s.stop_mode;
       const stopAfterOff = !running || (s.mode !== "batch" && !batchActive) || !!stopMode;
       const stopNowOff = !running || stopMode === "now";
+      const scheduled = running && stopMode === "after";
+      for (const id of ["stop-after", "stop-after-top"]) {
+        $(id).textContent = scheduled ? "✓ Stop scheduled" : "Stop after this one";
+        $(id).setAttribute("aria-pressed", String(scheduled));
+      }
       $("stop-after").disabled = stopAfterOff;
       $("stop-now").disabled = stopNowOff;
       const stopAfterTop = $("stop-after-top");
@@ -1628,10 +1830,14 @@
     function paintStopBanner(s) {
       const banner = $("stop-banner");
       if (!banner) return;
-      if (s.stop_mode === "after" && s.running) {
+      const batch = generationState?.batch;
+      const mode = batch?.active ? batch.stop_mode : s.stop_mode;
+      if (mode === "after" && (batch?.active || s.running)) {
+        const current = batch?.active ? batch.items.find(item => item.status === "running")?.input.split(/[\\/]/).pop() : s.image_name;
         banner.className = "stop-banner show";
-        banner.textContent = `Stop after this character is on. ${s.image_name || "This photo"} will finish, then the batch ends and the GPU is freed. Start and the other controls stay locked. Remaining photos wait until you Start again (leave Rebuild unticked).`;
-      } else if (s.stop_mode === "now" && s.running) {
+        banner.textContent = "Stop scheduled. " + (current || "The current image") +
+          " will finish processing, including saving its final Gaussian splat. The batch will then stop before starting the next image.";
+      } else if (mode === "now" && (batch?.active || s.running)) {
         banner.className = "stop-banner show now";
         banner.textContent = "Stopping immediately and freeing the GPU…";
       } else if (s.status === "stopped_after") {
@@ -2239,6 +2445,176 @@
       $("start").click();
     };
 
+    function filterBatchRows() {
+      const query = $("batch-find").value.trim().toLowerCase();
+      const filter = $("batch-filter").value;
+      let visible = 0, current = false;
+      const rows = $("generated-batch-items").rows;
+      for (const row of rows) {
+        const status = row.dataset.status;
+        const matches = filter === "all" || filter === status ||
+          (filter === "finished" && ["done","skipped"].includes(status)) ||
+          (filter === "attention" && (["failed","stopped"].includes(status) || row.dataset.warning === "true"));
+        row.hidden = !(matches && row.dataset.search.includes(query));
+        if (!row.hidden) visible++;
+        if (status === "running") current = true;
+      }
+      $("batch-counts").textContent = visible ? "Showing "+visible+" of "+rows.length+" images" : "No matching images";
+      $("batch-jump").disabled = !current;
+      $("batch-clear").hidden = !query && filter === "all";
+    }
+    $("batch-find").oninput = $("batch-filter").onchange = filterBatchRows;
+    $("batch-clear").onclick = () => {
+      $("batch-find").value = ""; $("batch-filter").value = "all"; filterBatchRows();
+    };
+    $("batch-jump").onclick = () => {
+      const current = generationState?.batch?.items.find(item=>item.status==="running");
+      if (current) openBatchViewer(current.input);
+    };
+    const batchViewer = $("batch-viewer");
+    let viewedInput = null;
+    function batchTiming(item) {
+        const showDate = item.started_at && item.finished_at && new Date(item.started_at*1000).toDateString()!==new Date(item.finished_at*1000).toDateString();
+            const formatTime = value => value ? new Date(value*1000).toLocaleString("en-GB",{...(showDate?{day:"numeric",month:"short",year:"numeric"}:{}),hour:"numeric",minute:"2-digit",hour12:true}).replace(/am|pm/g,s=>s.toUpperCase()) : "—";
+        const mins = Number.isFinite(item.duration_seconds) ? Math.floor(item.duration_seconds / 60) : null;
+        return {start:formatTime(item.started_at), finish:formatTime(item.finished_at),
+          duration:mins === null ? "—" : Math.floor(mins/60)+"h "+(mins%60)+"m"};
+    }
+    function updateBatchViewer() {
+      if (!batchViewer.open) return;
+      const batch = generationState?.batch;
+      const index = batch?.items.findIndex(item => item.input === viewedInput) ?? -1;
+      if (index < 0) { batchViewer.close(); return; }
+      const item = batch.items[index];
+      const name = item.input.split(/[\\/]/).pop();
+      const photo = $("batch-photo");
+      if (photo.dataset.path !== item.input) {
+        photo.dataset.path = item.input;
+        photo.alt = name;
+        photo.src = batchImageUrl(item.input);
+      }
+      $("batch-prev").disabled = $("batch-next").disabled = batch.items.length < 2;
+      const timing = batchTiming(item);
+      const title = document.createElement("strong");
+      title.textContent = (index+1)+" / "+batch.items.length+" · "+name;
+      const badge = document.createElement("span");
+      badge.className = "batch-status "+item.status;
+      badge.textContent = batchStatusLabel(item.status);
+      const foot = $("batch-footer");
+      foot.replaceChildren(title,badge);
+      for (const value of ["Project "+batch.experiment+" / "+item.name,"Started "+timing.start,"Finished "+timing.finish,"Duration "+timing.duration,item.error,item.warning]) {
+        if (value) {const field=document.createElement("span");field.textContent=value;foot.append(field);}
+      }
+    }
+    function batchImageUrl(path) {
+      const endpoint = /\.tiff?$/i.test(path) ? "/api/thumb?full=1&p=" : "/api/media?p=";
+      return endpoint + encodeURIComponent(path);
+    }
+    function stepBatchViewer(delta) {
+      const items = generationState?.batch?.items || [];
+      if (!items.length) return;
+      const index = items.findIndex(item => item.input === viewedInput);
+      viewedInput = items[(index+delta+items.length)%items.length].input;
+      updateBatchViewer();
+    }
+    function openBatchViewer(input) {
+      viewedInput = input;
+      batchViewer.showModal();
+      updateBatchViewer();
+    }
+    function batchStatusLabel(status) {
+      return ({done:"Finished",skipped:"Already finished",running:"Running",failed:"Failed",stopped:"Stopped",queued:"Queued"})[status] || status;
+    }
+    $("batch-prev").onclick = () => stepBatchViewer(-1);
+    $("batch-next").onclick = () => stepBatchViewer(1);
+    $("batch-close").onclick = () => batchViewer.close();
+    let swipeStart = null;
+    const photoSurface = $("batch-photo");
+    photoSurface.addEventListener("touchstart", event => {
+      const touch = event.touches[0];
+      swipeStart = event.touches.length === 1 ? [touch.clientX,touch.clientY] : null;
+    }, {passive:true});
+    photoSurface.addEventListener("touchcancel", () => { swipeStart = null; });
+    photoSurface.addEventListener("touchend", event => {
+      if (!swipeStart) return;
+      const touch = event.changedTouches[0];
+      const dx = touch.clientX - swipeStart[0], dy = touch.clientY - swipeStart[1];
+      swipeStart = null;
+      if (Math.abs(dx) >= 50 && Math.abs(dx) > 1.5*Math.abs(dy)) stepBatchViewer(dx<0 ? 1 : -1);
+    }, {passive:true});
+    batchViewer.addEventListener("keydown", event => {
+      if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+        event.preventDefault(); stepBatchViewer(event.key === "ArrowLeft" ? -1 : 1);
+      }
+    });
+    let stagedImages = [];
+    let stagingBatch = null;
+    let stagingBusy = false;
+    function renderStaged() {
+      const list = $("staged-images");
+      list.replaceChildren();
+      stagedImages.forEach((path,index) => {
+        const row = document.createElement("li");
+        row.append(path.split(/[\\/]/).pop()+" ");
+        row.title = path;
+        for (const [label,offset] of [["Move up",-1],["Move down",1],["Remove",0]]) {
+          const button = document.createElement("button");
+          button.type = "button"; button.textContent = label;
+          button.disabled = stagingBusy || index+offset < 0 || index+offset >= stagedImages.length;
+          button.onclick = () => {
+            stagedImages.splice(index,1);
+            if (offset) stagedImages.splice(index+offset,0,path);
+            renderStaged();
+          };
+          row.append(button);
+        }
+        list.append(row);
+      });
+      const count = stagedImages.length;
+      $("stage-count").textContent = count ? count+" selected. Use Move up or Move down before adding." : "Choose an image or folder to get started.";
+      $("append-staged").textContent = count ? "Add "+count+(count === 1 ? " image" : " images")+" to end of queue" : "Add to end of queue";
+      $("append-staged").disabled = stagingBusy || !stagedImages.length;
+      $("stage-file").disabled = $("stage-folder").disabled = stagingBusy;
+    }
+    async function stageImages(kind) {
+      const batchId = stagingBatch;
+      stagingBusy = true; renderStaged();
+      try {
+        const picked = await post("/api/browse",{kind});
+        if (!picked.path) return;
+        const result = await post("/api/generation/stage-images",
+          {input:picked.path,recursive:$("stage-recursive").checked});
+        if (!result.ok) throw Error(result.error);
+        if (batchId !== stagingBatch) return;
+        const known = new Set([...stagedImages,...generationState.batch.items.map(item=>item.input)].map(path=>path.toLowerCase()));
+        const fresh = result.photos.filter(path=>!known.has(path.toLowerCase()));
+        stagedImages.push(...fresh);
+        $("stage-feedback").textContent = fresh.length ? "Review the order, then add these images to the queue." : "No new images in this selection.";
+      } catch(error) { $("stage-feedback").textContent = error.message; }
+      finally { stagingBusy = false; renderStaged(); }
+    }
+    $("jump-additions").onclick = () => {
+      const panel = $("batch-additions");
+      panel.open = true; panel.scrollIntoView({block:"center"}); $("stage-file").focus({preventScroll:true});
+    };
+    $("stage-file").onclick = () => stageImages("file");
+    $("stage-folder").onclick = () => stageImages("folder");
+    $("append-staged").onclick = async () => {
+      stagingBusy = true; renderStaged();
+      try {
+        const result = await post("/api/generation/append",{batch_id:stagingBatch,photos:stagedImages});
+        if (!result.ok) throw Error(result.error);
+        stagedImages = [];
+        $("stage-feedback").textContent = result.added+" added to the end of the queue.";
+        await pollGeneration();
+      } catch(error) { $("stage-feedback").textContent = error.message; }
+      finally { stagingBusy = false; renderStaged(); }
+    };
+    function resumableBatch() {
+      const batch = generationState?.batch;
+      return isGenerationBatch() && batch?.status === "stopped" && !batch.active &&
+        sameFolder(batch.input, $("path").value.trim()) && batch.experiment === $("experiment").value.trim();
+    }
     async function pollGeneration() {
       try {
         const g = await fetch("/api/generation").then(r => r.json());
@@ -2275,7 +2651,13 @@
         $("generation-stop").textContent = batch.active ? "Stop batch now" : "Stop generating";
         $("generated-batch-results").hidden = !batch.items.length || !isGenerationBatch();
         $("generated-batch-status").textContent = batch.message || "";
-        const batchSignature = JSON.stringify(batch.items);
+        updateBatchViewer();
+        $("batch-additions").hidden = !(batch.active && batch.status === "running" && !batch.stop_mode && batch.batch_id);
+        $("jump-additions").hidden = $("batch-additions").hidden;
+        if (stagingBatch !== batch.batch_id) {
+          stagingBatch = batch.batch_id; stagedImages = []; renderStaged(); $("stage-feedback").textContent = "";
+        }
+        const batchSignature = JSON.stringify([batch.experiment,batch.items]);
         if ($("generated-batch-items").dataset.signature !== batchSignature) {
           $("generated-batch-items").dataset.signature = batchSignature;
           $("generated-batch-items").replaceChildren();
@@ -2283,10 +2665,19 @@
             const row = document.createElement("tr");
             const cell = text => {const td=document.createElement("td");td.textContent=text;row.append(td);return td;};
             const original = item.input.replace(/\\/g,"/").split("/").pop();
+            row.dataset.status = item.status;
+            row.dataset.search = (original+" "+item.name).toLowerCase();
+            row.dataset.warning = String(Boolean(item.warning));
+            const thumb = document.createElement("button");
+            thumb.type="button"; thumb.className="batch-thumb";
+            thumb.setAttribute("aria-label","View "+original+" full screen");
+            const img = document.createElement("img");
+            img.loading="lazy"; img.alt=""; img.src=batchImageUrl(item.input);
+            thumb.append(img); thumb.onclick=()=>openBatchViewer(item.input); cell("").append(thumb);
             const nameCell=cell(original); nameCell.title=item.input;
             const statusCell=cell(""); const badge=document.createElement("span");
             badge.className="batch-status "+(["done","skipped","running","failed","stopped"].includes(item.status)?item.status:"queued");
-            badge.textContent=({done:"Finished",skipped:"Already finished",running:"Running",failed:"Failed",stopped:"Stopped",queued:"Queued"})[item.status] || item.status;
+            badge.textContent=batchStatusLabel(item.status);
             statusCell.append(badge);
             for (const note of [item.error,item.warning]) if(note) {const small=document.createElement("small");small.className="batch-note";small.textContent=note;statusCell.append(small);}
             const files=cell("");
@@ -2294,13 +2685,13 @@
               button.onclick=async()=>{const result=await post("/api/open_folder",{experiment:batch.experiment,name:item.name,mode:"video",where});$("folder-feedback").textContent=result.ok?"Opened in File Explorer.":result.error;};files.append(button);};
             if(item.status!=="queued") addLink("Open project","work");
             if(item.status==="done" || item.status==="skipped") {addLink("Show PLY","ply");files.title=item.ply || "";}
-            const showDate = item.started_at && item.finished_at && new Date(item.started_at*1000).toDateString()!==new Date(item.finished_at*1000).toDateString();
-            const formatTime = value => value ? new Date(value*1000).toLocaleString("en-GB",{...(showDate?{day:"numeric",month:"short",year:"numeric"}:{}),hour:"numeric",minute:"2-digit",hour12:true}).replace(/am|pm/g,s=>s.toUpperCase()) : "—";
-            cell(formatTime(item.started_at));cell(formatTime(item.finished_at));
-            const mins=Number.isFinite(item.duration_seconds)?Math.floor(item.duration_seconds/60):null;
-            cell(mins===null?"—":`${Math.floor(mins/60)}h ${mins%60}m`);
+            const timing = batchTiming(item);
+            cell(timing.start).dataset.label="Started";
+            cell(timing.finish).dataset.label="Finished";
+            cell(timing.duration).dataset.label="Duration";
             $("generated-batch-items").append(row);
           }
+          filterBatchRows();
         }
         const sameProject = g.input && g.input.replace(/\\/g,"/").toLowerCase() === $("path").value.trim().replace(/\\/g,"/").toLowerCase() && g.experiment === $("experiment").value.trim();
         $("candidates-wrap").hidden = isGenerationBatch() || !g.candidates.length || mode() !== "generate" || !sameProject;
@@ -2344,7 +2735,7 @@
         if (batch.active) {
           $("start").textContent = "Processing folder…";
         } else if (isGenerationBatch()) {
-          $("start").textContent = "Start automated folder batch";
+          $("start").textContent = resumableBatch() ? "Resume batch" : "Start automated folder batch";
         } else if (g.active) {
           $("current").textContent = g.message;
           $("start").textContent = "Generating…";
@@ -2450,6 +2841,14 @@
     $("start").onclick = async () => {
       $("error").textContent = "";
       failDismissedKey = "";
+      if (resumableBatch()) {
+        $("start").disabled = true;
+        try {
+          const result = await post("/api/generation/resume", {batch_id:generationState.batch.batch_id});
+          if (!result.ok) showStartError(result.error);
+        } finally { await pollGeneration(); }
+        return;
+      }
       const payload = {
         mode: mode(),
         generation_batch: isGenerationBatch(),
@@ -2510,7 +2909,9 @@
     async function requestStop(how) {
       $("error").textContent = "";
       const data = await post(generationActive ? "/api/generation/stop" : "/api/stop", { how });
-      if (!data.ok) $("error").textContent = data.error || "";
+      if (!data.ok) $("error").textContent = data.error || "Could not schedule the stop.";
+      else if (generationActive) await pollGeneration();
+      else applyStatus(await fetch("/api/status").then(r=>r.json()));
     }
 
     $("stop-after").onclick = () => requestStop("after");
@@ -2526,7 +2927,7 @@
       $("candidate-gallery").replaceChildren();
       $("candidates-wrap").hidden = true;
       $("reset-confirm").hidden = true;
-      $("reset-slider").value = "0";
+      clearResetPhrase();
       $("reset-error").textContent = "";
       $("path").value = "";
       $("experiment").value = "";
@@ -2544,28 +2945,40 @@
       setRunCollapsed(false);
       applyStatus(s);
     }
+    function clearResetPhrase() {
+      $("reset-phrase").value = "";
+      $("reset-submit").disabled = true;
+    }
     $("reset-run").onclick = () => {
-      $("reset-slider").value = "0";
+      clearResetPhrase();
       $("reset-error").textContent = "";
       $("reset-confirm").hidden = false;
+      $("reset-phrase").focus();
     };
     $("reset-cancel").onclick = () => {
       $("reset-confirm").hidden = true;
-      $("reset-slider").value = "0";
+      clearResetPhrase();
+      $("reset-run").focus();
     };
-    $("reset-slider").onchange = async () => {
-      if (Number($("reset-slider").value) < 100) {
-        $("reset-slider").value = "0";
-        return;
-      }
-      $("reset-slider").disabled = true;
+    $("reset-phrase").oninput = () => {
+      $("reset-submit").disabled = $("reset-phrase").value !== "Confirm Reset";
+    };
+    $("reset-phrase").onkeydown = event => {
+      if (event.key === "Enter" && !event.isComposing) $("reset-submit").click();
+    };
+    $("reset-submit").onclick = async () => {
+      if ($("reset-phrase").value !== "Confirm Reset") return;
+      $("reset-submit").disabled = true;
+      $("reset-phrase").disabled = true;
       try {
-        const data = await post("/api/reset", { confirmed: true });
+        const data = await post("/api/reset", {confirmed:true});
         if (data.ok) resetForNextVideo(data.state);
         else $("reset-error").textContent = data.error || "Reset failed. Try again.";
+      } catch (error) {
+        $("reset-error").textContent = error.message;
       } finally {
-        $("reset-slider").disabled = false;
-        $("reset-slider").value = "0";
+        $("reset-phrase").disabled = false;
+        clearResetPhrase();
       }
     };
     $("run-toggle").onclick = () => {

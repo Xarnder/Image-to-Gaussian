@@ -46,6 +46,22 @@ class GeneratedBatchTests(unittest.TestCase):
             self.assertEqual(item['duration_seconds'],item['finished_at']-item['started_at'])
             self.assertTrue((Path(item['project_dir'])/'batch_timing.json').is_file())
 
+    def test_append_during_last_item(self):
+        batch = GeneratedBatch()
+        batch.start(self.body, self.photos[:1], None)
+        seen = []
+        def process(body, cancel):
+            seen.append(Path(body['input']))
+            if len(seen) == 1:
+                result = batch.append(batch.state['batch_id'], [self.photos[2], self.photos[1], self.photos[0]])
+                self.assertEqual(result['added'], 2)
+            return {'ok': False, 'error': 'test fixture'}
+        batch._run(self.body, process)
+        self.assertEqual(seen, [self.photos[0], self.photos[2], self.photos[1]])
+        self.assertEqual(len({i['name'] for i in batch.state['items']}), 3)
+        with self.assertRaises(ValueError):
+            batch.append(batch.state['batch_id'], self.photos)
+
     def test_review_multiple_rejected_single_allowed(self):
         batch = GeneratedBatch()
         with self.assertRaises(ValueError):
@@ -75,6 +91,29 @@ class GeneratedBatchTests(unittest.TestCase):
         self.assertEqual(batch.state["completed"], 1)
         self.assertEqual(batch.state["status"], "stopped")
         self.assertEqual(batch.state["items"][1]["status"], "queued")
+
+    def test_resume_saved_queue_after_restart_skips_completed_even_with_rebuild(self):
+        session = self.root / 'session.json'
+        batch = GeneratedBatch(session)
+        settings = self.body | {'redo': True}
+        seen = []
+        def process(body, cancel):
+            seen.append(Path(body['input']))
+            item = next(i for i in batch.state['items'] if i['input'] == body['input'])
+            ply = Path(item['ply'])
+            ply.parent.mkdir(parents=True); ply.write_bytes(b'ply')
+            if len(seen) == 1:
+                batch.append(batch.state['batch_id'], self.photos[2:])
+                batch.stop('after')
+            return {'ok': True}
+        batch.start(settings, self.photos[:2], process)
+        batch._run(settings, process)
+        batch = GeneratedBatch(session)
+        batch.resume(batch.state['batch_id'], process)
+        batch._run(settings, process)
+        self.assertEqual(seen, self.photos)
+        self.assertEqual(batch.state['completed'], 3)
+        self.assertEqual(batch.state['status'], 'done')
 
     def test_stop_now_is_forwarded_and_does_not_advance(self):
         batch = GeneratedBatch()

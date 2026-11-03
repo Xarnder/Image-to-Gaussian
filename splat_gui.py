@@ -35,6 +35,7 @@ from batch_to_splat import (  # noqa: E402
     run_names,
 )
 from image_to_splat import IMAGE_TYPES, PRESETS  # noqa: E402
+from i2g.splat_history import catalogue, CACHE as HISTORY_CACHE, metadata as history_metadata
 from i2g.paths import OUTPUT_DIR, existing_experiments, find_deliverable, safe_run_name  # noqa: E402
 from i2g.pipeline import STAGE_TITLES, STAGES  # noqa: E402
 from i2g.video_options import VIDEO_STAGES, video_command, video_output, video_settings, archive_replaced_video
@@ -1367,7 +1368,7 @@ def _reset_run(body: dict) -> dict:
     if GENERATION.snapshot()["active"]:
         return {"ok": False, "error": "Stop video generation before resetting."}
     if body.get("confirmed") is not True:
-        return {"ok": False, "error": "Slide to confirm reset."}
+        return {"ok": False, "error": "Type Confirm Reset to confirm the session reset."}
     with STATE.lock:
         if STATE.running or (STATE.proc is not None and STATE.proc.poll() is None):
             return {"ok": False, "error": "Stop the current run before resetting."}
@@ -1594,6 +1595,8 @@ def _watch(proc: subprocess.Popen) -> None:
             write_stop_record("after" if (stop_mode == "after" or code == STOP_AFTER_EXIT) else "now", code)
         else:
             write_stop_record("failed", code)
+    if code in (0, STOP_AFTER_EXIT):
+        threading.Thread(target=catalogue, name="splat-history-index", daemon=True).start()
     STATE.emit({"type": "done", "code": code, **STATE.snapshot()})
     if GENERATION.snapshot().get("status") == "reconstructing":
         GENERATION.update(status=STATE.status, message=("Gaussian splat finished. Videos remain available below." if code == 0 else "Reconstruction stopped or failed. Review the console; you can select another video or generate more."))
@@ -1863,6 +1866,30 @@ class Handler(BaseHTTPRequestHandler):
             page = (GUI_DIR / "index.html").read_bytes()
             self._send(200, page, "text/html; charset=utf-8")
             return
+        if path == "/api/training-rate":
+            status = STATE.snapshot()
+            samples = []
+            if status.get("work_dir"):
+                source = Path(status["work_dir"]) / "training-rate.csv"
+                try:
+                    for line in source.read_text(encoding="ascii").splitlines(keepends=True):
+                        if line.endswith("\n"):
+                            elapsed, step, rate = line.split(",")
+                            samples.append([float(elapsed), int(step), float(rate)])
+                except (OSError, ValueError):
+                    pass
+            self._json(200, {"name": status.get("run_name"), "samples": samples})
+            return
+        if path == "/api/splat-history":
+            try:
+                items = catalogue()
+                for item in items:
+                    if item["thumbnail"]:
+                        item["thumbnail"] = "/api/media?p=" + quote(str(HISTORY_CACHE / item["thumbnail"]), safe="")
+                self._json(200, {"items": items})
+            except OSError as exc:
+                self._json(500, {"error": str(exc)})
+            return
         if path == "/api/status":
             self._json(200, STATE.snapshot())
             return
@@ -1900,6 +1927,39 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError as exc:
             self._json(400, {"ok": False, "error": str(exc)})
             return
+        if path == "/api/history/reveal":
+            entry = history_metadata(HISTORY_CACHE / "index.json").get(body.get("id"))
+            result = reveal_under_output(Path(entry["ply"]), select_file=True) if entry else {"ok": False, "error": "History entry not found."}
+            self._json(200 if result.get("ok") else 400, result)
+            return
+        if path == "/api/training-preview":
+            status = STATE.snapshot()
+            work = Path(status["work_dir"]) if status.get("work_dir") else None
+            result = {"ok": True, "url": None}
+            if work and work.is_dir() and work.resolve().is_relative_to(OUTPUT_DIR.resolve()):
+                lease = work / ".training-preview-enabled"
+                try:
+                    if body.get("enabled") and status["running"]:
+                        lease.touch()
+                        frame = work / "training-preview.jpg"
+                        if frame.is_file() and time.time() - frame.stat().st_mtime < 15:
+                            result["url"] = "/api/media?p=" + quote(str(frame), safe="") + "&t=" + str(frame.stat().st_mtime_ns)
+                    else:
+                        lease.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            self._json(200, result)
+            return
+        if path == "/api/generation/resume":
+            with LAUNCH_LOCK:
+                try:
+                    if STATE.running or GENERATION.snapshot()["active"]:
+                        raise ValueError("Wait for the current job to finish.")
+                    result = BATCH_GENERATION.resume(body.get("batch_id"), process_generated_image)
+                except (ValueError, OSError) as exc:
+                    result = {"ok": False, "error": str(exc)}
+            self._json(200 if result["ok"] else 400, result)
+            return
         if path == "/api/generation/start":
             with LAUNCH_LOCK:
                 try:
@@ -1918,6 +1978,24 @@ class Handler(BaseHTTPRequestHandler):
                 except (ValueError, TypeError, OSError) as exc:
                     result = {"ok": False, "error": str(exc)}
             self._json(200 if result.get("ok") else 400, result)
+            return
+        if path in ("/api/generation/stage-images", "/api/generation/append"):
+            try:
+                if path.endswith("stage-images"):
+                    source = Path(body["input"]).resolve()
+                    photos = [str(p.resolve()) for p in find_photos(source, bool(body.get("recursive"))) if p.suffix.lower() in IMAGE_TYPES]
+                    result = {"ok": True, "photos": photos}
+                else:
+                    paths = body.get("photos")
+                    if not isinstance(paths, list) or not paths:
+                        raise ValueError("Choose images to append.")
+                    photos = [Path(p) for p in paths]
+                    if any(p.suffix.lower() not in IMAGE_TYPES for p in photos):
+                        raise ValueError("Choose supported image files.")
+                    result = BATCH_GENERATION.append(body.get("batch_id"), photos)
+            except (KeyError, ValueError, TypeError, OSError) as exc:
+                result = {"ok": False, "error": str(exc)}
+            self._json(200 if result["ok"] else 400, result)
             return
         if path == "/api/generation/select":
             if BATCH_GENERATION.snapshot()["active"]:
@@ -1969,10 +2047,12 @@ class Handler(BaseHTTPRequestHandler):
             return
         try:
             from io import BytesIO
-            from PIL import Image
+            from PIL import Image, ImageOps
             with Image.open(image) as im:
+                im = ImageOps.exif_transpose(im)
                 has_alpha = im.mode in ("RGBA", "LA") or (im.mode == "P" and "transparency" in im.info)
-                im.thumbnail((72, 96))
+                if qs.get("full") != ["1"]:
+                    im.thumbnail((72, 96))
                 buf = BytesIO()
                 if has_alpha:
                     im = im.convert("RGBA")

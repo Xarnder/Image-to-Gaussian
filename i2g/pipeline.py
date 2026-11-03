@@ -512,7 +512,7 @@ def _train_and_export(paths: RunPaths, opts: RunOptions, cfg, world: dict, regis
     bar = make_bar(total=cfg.iterations, desc="Training splat", unit="it") if make_bar else NullBar()
     try:
         with vram.stage(stage, report):
-            params, stats = train(views, world, cfg, bar)
+            params, stats = train(views, world, cfg, bar, preview_dir=paths.work)
     except torch.cuda.OutOfMemoryError as exc:
         raise PipelineError("the GPU ran out of memory while training",
                             hint=f"Close other GPU apps and ComfyUI tabs, then rerun with --from_stage {stage}. "

@@ -266,7 +266,7 @@ def fit(args, root):
         keep = np.all((xyz >= bounds[0]) & (xyz <= bounds[1]), axis=1)
         init = (torch.tensor(xyz[keep], device="cuda", dtype=torch.float32),
                 torch.tensor(colors[keep], device="cuda", dtype=torch.float32))
-    params, stats = train(views, world, cfg, bar=TrainingProgress(cfg.iterations), init=init)
+    params, stats = train(views, world, cfg, bar=TrainingProgress(cfg.iterations), init=init, preview_dir=root)
     progress("export", 0., "Cleaning and exporting the trained splat")
     refined = torch.tensor(stats.pop("refined_w2c"), device="cuda")
     cleaning = clean(params, views, refined, cfg)

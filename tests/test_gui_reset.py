@@ -12,6 +12,8 @@ class ResetTests(unittest.TestCase):
         patcher = patch.object(gui, 'GENERATION', gui.VideoGeneration())
         patcher.start()
         self.addCleanup(patcher.stop)
+        batch = patch.object(gui, "BATCH_GENERATION", gui.GeneratedBatch())
+        batch.start(); self.addCleanup(batch.stop)
 
     def test_requires_confirmation(self):
         with patch.object(gui, 'STATE', gui.RunState()):

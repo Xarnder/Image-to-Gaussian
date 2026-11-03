@@ -396,7 +396,7 @@ def needle_mask(params, ratio: float, min_len_m: float) -> torch.Tensor:
 
 
 def train(views: dict, world: dict, cfg: SplatConfig, bar=None, init=None,
-          extra_loss=None) -> tuple[torch.nn.ParameterDict, dict]:
+          extra_loss=None, preview_dir=None) -> tuple[torch.nn.ParameterDict, dict]:
     """`init` = (points, colours) replaces the visual hull as the starting point cloud; `extra_loss(params,
     step)` adds a regulariser (e.g. headpass's surface leash); views["loss_masks"] (optional, per view
     (H,W,1) or None) excludes pixels from every image loss - neither colour nor alpha is learned there."""
@@ -485,6 +485,22 @@ def train(views: dict, world: dict, cfg: SplatConfig, bar=None, init=None,
 
     start = time.perf_counter()
     reported = 0
+    next_preview_check = 0.0
+    if preview_dir is not None:
+        preview_frame = preview_dir / "training-preview.jpg"
+        preview_lease = preview_dir / ".training-preview-enabled"
+        try:
+            preview_frame.unlink(missing_ok=True)
+        except OSError:
+            pass
+    rate_file = preview_dir / "training-rate.csv" if preview_dir is not None else None
+    previous_elapsed = 0.0
+    previous_step = 0
+    if rate_file:
+        try:
+            rate_file.write_text("", encoding="ascii")
+        except OSError:
+            rate_file = None
     for step in range(cfg.iterations):
         i = int(torch.multinomial(probs, 1, generator=gen))
         img, mat = views["images"][i], views["alphas"][i]
@@ -519,6 +535,20 @@ def train(views: dict, world: dict, cfg: SplatConfig, bar=None, init=None,
 
         if i != 0:
             rgb = rgb @ color_A[i].T + color_b[i] * alpha
+        if preview_dir is not None and step % 10 == 0 and time.monotonic() >= next_preview_check:
+            next_preview_check = time.monotonic() + 2
+            try:
+                if preview_lease.exists() and time.time() - preview_lease.stat().st_mtime < 15:
+                    with torch.no_grad():
+                        pixels = ((rgb.detach() + (1 - alpha.detach()) * 0.5).clamp(0, 1) * 255).byte().cpu().numpy()
+                    frame = Image.fromarray(pixels)
+                    frame.thumbnail((768, 768))
+                    temporary = preview_frame.with_suffix(".tmp")
+                    frame.save(temporary, format="JPEG", quality=84)
+                    temporary.replace(preview_frame)
+                    next_preview_check = time.monotonic() + 5
+            except (OSError, RuntimeError, ValueError) as exc:
+                log.debug("Training preview unavailable: %s", exc)
         bg = torch.rand(3, device=device)
         pred = rgb + (1 - alpha) * bg
         target = img * mat + (1 - mat) * bg
@@ -586,6 +616,15 @@ def train(views: dict, world: dict, cfg: SplatConfig, bar=None, init=None,
             bar.update(step + 1 - reported)
             reported = step + 1
             bar.set_postfix_str(f"loss {loss.item():.4f}  gaussians {len(params['means']):,}")
+            elapsed = time.perf_counter() - start
+            if rate_file and (elapsed - previous_elapsed >= 2 or step + 1 == cfg.iterations):
+                rate = (step + 1 - previous_step) / max(1e-9, elapsed - previous_elapsed)
+                try:
+                    with rate_file.open("a", encoding="ascii") as stream:
+                        stream.write(f"{elapsed:.3f},{step + 1},{rate:.3f}\n")
+                except OSError:
+                    rate_file = None
+                previous_step, previous_elapsed = step + 1, elapsed
         if step % 1000 == 0 or step == cfg.iterations - 1:
             log.debug("step %5d loss %.4f l1 %.4f gaussians %d %.1fs", step, loss.item(), l1.item(),
                       len(params["means"]), time.perf_counter() - start)

@@ -4,6 +4,7 @@ import hashlib
 import json
 import threading
 import time
+import uuid
 from pathlib import Path
 
 from .paths import OUTPUT_DIR, safe_run_name, deliverable_path, find_deliverable
@@ -84,12 +85,70 @@ class GeneratedBatch:
             self.cancel.clear(); self.after.clear()
             self.manifest = OUTPUT_DIR / experiment / "generated_batch.json"
             self.manifest.parent.mkdir(parents=True, exist_ok=True)
-            self.state = {"active": True, "input": str(folder), "experiment": body["experiment"],
+            self.state = {"active": True, "batch_id": uuid.uuid4().hex, "input": str(folder), "experiment": body["experiment"],
                           "status": "running", "items": items, "completed": 0, "total": len(items),
                           "message": "Starting automated image batch…", "settings": copy.deepcopy(body)}
             self.save()
             threading.Thread(target=self._run, args=(copy.deepcopy(body), process), daemon=True).start()
             return {"ok": True}
+
+    def resume(self, batch_id, process):
+        with self.lock:
+            if (self.state.get("active") or self.state.get("status") != "stopped"
+                    or self.state.get("batch_id") != batch_id):
+                raise ValueError("This saved batch is no longer available to resume.")
+            body = copy.deepcopy(self.state["settings"])
+            experiment = safe_run_name(self.state["experiment"])
+            finished = 0
+            for item in self.state["items"]:
+                final = OUTPUT_DIR / experiment / item["name"] / "video" / "final"
+                if item["status"] in ("done", "skipped"):
+                    ply = find_deliverable(final, item["name"], "character.ply", experiment)
+                    if ply:
+                        item["ply"] = str(ply)
+                        finished += 1
+                        continue
+                item.update(status="queued", ply=str(deliverable_path(final, item["name"], "character.ply", experiment)))
+                for key in ("error", "warning", "started_at", "finished_at", "duration_seconds"):
+                    item.pop(key, None)
+            self.cancel.clear()
+            self.after.clear()
+            self.state.pop("stop_mode", None)
+            self.state.update(active=True, status="running", completed=finished, message="Resuming the saved queue.")
+            self.save()
+            threading.Thread(target=self._run, args=(body, process), daemon=True).start()
+            return {"ok": True}
+
+    def append(self, batch_id, photos):
+        with self.lock:
+            if (not self.state['active'] or self.state['status'] != 'running'
+                    or self.after.is_set() or batch_id != self.state.get('batch_id')):
+                raise ValueError("This batch is no longer accepting images.")
+            items = self.state['items']
+            known = {Path(item['input']).resolve() for item in items}
+            names = {item['name'].casefold() for item in items}
+            experiment = safe_run_name(self.state['experiment'])
+            added = []
+            for source in photos:
+                source = source.resolve()
+                if source in known:
+                    continue
+                if not source.is_file():
+                    raise ValueError(f"Image no longer exists: {source}")
+                name = safe_run_name(source.stem)
+                if name.casefold() in names:
+                    name += '_' + hashlib.sha256(str(source).casefold().encode()).hexdigest()[:10]
+                if name.casefold() in names:
+                    raise ValueError(f"Project name already in use: {name}")
+                final = deliverable_path(OUTPUT_DIR / experiment / name / 'video' / 'final',
+                                         name, 'character.ply', experiment)
+                added.append({'input': str(source), 'name': name, 'ply': str(final), 'status': 'queued'})
+                known.add(source)
+                names.add(name.casefold())
+            items.extend(added)
+            self.state['total'] = len(items)
+            self.save()
+            return {'ok': True, 'added': len(added), 'duplicates': len(photos) - len(added)}
 
     def stop(self, how="now"):
         self.after.set()
@@ -103,9 +162,18 @@ class GeneratedBatch:
 
     def _run(self, body, process):
         try:
-            for item in self.state["items"]:
-                if self.after.is_set():
-                    break
+            index = 0
+            while not self.after.is_set():
+                with self.lock:
+                    if index == len(self.state['items']):
+                        failed = sum(i['status'] == 'failed' for i in self.state['items'])
+                        self.state.update(status='failed' if failed else 'done',
+                                          message=f"Batch complete: {self.state['completed']} finished or already saved, {failed} failed.")
+                        break
+                    item = self.state['items'][index]
+                    index += 1
+                    if item["status"] in ("done", "skipped"):
+                        continue
                 existing = find_deliverable(Path(item["ply"]).parent, item["name"], "character.ply", body["experiment"])
                 final_dir = Path(item["ply"]).parent
                 timing_file = final_dir.parent / 'batch_timing.json'
@@ -154,11 +222,8 @@ class GeneratedBatch:
                     if result.get("warning"):
                         item["warning"] = result["warning"]
                     self.save()
-            else:
-                failed = sum(i["status"] == "failed" for i in self.state["items"])
-                self.state.update(status="failed" if failed else "done", message=f"Batch complete: {self.state['completed']} finished or already saved, {failed} failed. Start again to retry failures; completed splats are skipped.")
             if self.after.is_set():
-                self.state.update(status="stopped", message="Batch stopped. Completed splats are kept.")
+                self.state.update(status="stopped", message="Batch stopped. Press Resume batch to continue the saved queue. Finished splats will be skipped.")
         except Exception as exc:
             if 'item' in locals():
                 item.update(status="failed", error=str(exc))
