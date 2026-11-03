@@ -36,7 +36,7 @@ from batch_to_splat import (  # noqa: E402
 )
 from image_to_splat import IMAGE_TYPES, PRESETS  # noqa: E402
 from i2g.splat_history import catalogue, CACHE as HISTORY_CACHE, metadata as history_metadata
-from i2g.paths import OUTPUT_DIR, existing_experiments, find_deliverable, safe_run_name  # noqa: E402
+from i2g.paths import reviewed_names, OUTPUT_DIR, existing_experiments, find_deliverable, safe_run_name  # noqa: E402
 from i2g.pipeline import STAGE_TITLES, STAGES  # noqa: E402
 from i2g.video_options import VIDEO_STAGES, video_command, video_output, video_settings, archive_replaced_video
 from i2g.video_generation import VideoGeneration, default_prompt
@@ -1412,9 +1412,18 @@ def _start_run(body: dict) -> dict:
         return {"ok": False, "error": f"no photos in {path}"}
     root = path_obj if path_obj.is_dir() else path_obj.parent
     if mode == "batch" and photos:
+        if "project_names" in body:
+            try:
+                reviewed_names(photos, body["project_names"], OUTPUT_DIR / safe_run_name(body["experiment"]))
+            except ValueError as exc:
+                return {"ok": False, "error": str(exc)}
         rels = [photo_rel(p, root) for p in photos]
         experiment = str(body.get("experiment") or "").strip()
         order_file = write_order_file(experiment, rels)
+        if "project_names" in body:
+            names_file = order_file.with_name("gui_project_names.json")
+            names_file.write_text(json.dumps(body["project_names"]), encoding="utf-8")
+            cmd.extend(["--project-names", str(names_file)])
         cmd.extend(["--order", str(order_file)])
         stop_path = REPO_ROOT / "output" / experiment / "stop.txt"
         cmd.extend(["--stop_file", str(stop_path)])
@@ -1444,7 +1453,7 @@ def _start_run(body: dict) -> dict:
         extra_raw = str(body.get("extra") or "")
         STATE.no_orbit = mode != "video" and (bool(body.get("no_orbit")) or "--no_orbit" in extra_raw.split())
         STATE.reset_stages()
-        named = run_names(photos) if photos else {}
+        named = reviewed_names(photos, body["project_names"]) if mode == "batch" and "project_names" in body else run_names(photos)
         STATE.photos = [{
             "name": safe_run_name(body["output_name"]) if mode == "video" and body.get("output_name") else named.get(p, safe_run_name(p.stem)),
             "file": photo_rel(p, root),
@@ -1950,6 +1959,29 @@ class Handler(BaseHTTPRequestHandler):
                     pass
             self._json(200, result)
             return
+        if path == "/api/batch-name-review":
+            try:
+                folder = Path(body["input"]).resolve()
+                photos, _ = ordered_photos(folder, bool(body.get("recursive")), order_lines(body.get("order")))
+                names = run_names(photos)
+                dest = OUTPUT_DIR / safe_run_name(body["experiment"])
+                saved = history_metadata(dest / "gui_project_names.json")
+                if body.get("generation_batch"):
+                    saved = {i["input"]: i["name"] for i in history_metadata(dest / "generated_batch.json").get("items", [])}
+                    # Preserve the existing MiniMax collision naming on first review.
+                    import hashlib
+                    from collections import Counter
+                    counts = Counter(safe_run_name(p.stem).casefold() for p in photos)
+                    for p in photos:
+                        name = safe_run_name(p.stem)
+                        if counts[name.casefold()] > 1:
+                            name += "_" + hashlib.sha256(str(p.relative_to(folder)).encode()).hexdigest()[:10]
+                        names[p] = name
+                self._json(200, {"ok": True, "items": [{"path": str(p), "file": photo_rel(p, folder),
+                    "name": saved.get(str(p), names[p])} for p in photos]})
+            except (KeyError, OSError, ValueError) as exc:
+                self._json(400, {"ok": False, "error": str(exc)})
+            return
         if path == "/api/generation/resume":
             with LAUNCH_LOCK:
                 try:
@@ -1992,7 +2024,7 @@ class Handler(BaseHTTPRequestHandler):
                     photos = [Path(p) for p in paths]
                     if any(p.suffix.lower() not in IMAGE_TYPES for p in photos):
                         raise ValueError("Choose supported image files.")
-                    result = BATCH_GENERATION.append(body.get("batch_id"), photos)
+                    result = BATCH_GENERATION.append(body.get("batch_id"), photos, body.get("project_names"))
             except (KeyError, ValueError, TypeError, OSError) as exc:
                 result = {"ok": False, "error": str(exc)}
             self._json(200 if result["ok"] else 400, result)

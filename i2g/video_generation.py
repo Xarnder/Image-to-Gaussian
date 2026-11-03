@@ -170,7 +170,7 @@ class VideoGeneration:
             fingerprint = digest(source) + digest(WORKFLOW) + SIZING_VERSION
             if prompt != default_prompt():
                 fingerprint += hashlib.sha256(prompt.encode("utf-8")).hexdigest()
-            root = OUTPUT_DIR / safe_run_name(experiment) / safe_run_name(source.stem) / "orbit_candidates" / hashlib.sha256(fingerprint.encode()).hexdigest()[:12]
+            root = OUTPUT_DIR / safe_run_name(experiment) / safe_run_name(body.get("output_name") or source.stem) / "orbit_candidates" / hashlib.sha256(fingerprint.encode()).hexdigest()[:12]
             root.mkdir(parents=True, exist_ok=True)
             saved = root / "generation.json"
             previous = json.loads(saved.read_text(encoding="utf-8")) if saved.exists() else {}

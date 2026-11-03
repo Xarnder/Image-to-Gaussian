@@ -229,6 +229,7 @@ def main(argv=None) -> int:
                     help="quality preset for every photo (default: standard, the best pipeline)")
     ap.add_argument("--recursive", action="store_true", help="also take photos from subfolders")
     ap.add_argument("--separate-ply", action="store_true", help="keep final PLY files in individual project folders")
+    ap.add_argument("--project-names", type=Path, help="Reviewed image path to project name mapping")
     ap.add_argument("--order", type=Path,
                     help="text file of photos in the order to build them (relative to --input or absolute, "
                          "one per line). Photos not listed stay at the end. Default is A–Z")
@@ -263,7 +264,8 @@ def main(argv=None) -> int:
         except OSError as exc:
             ap.error(str(exc))
         photos, order_warn = apply_photo_order(photos, wanted, folder)
-    names = run_names(photos)
+    from i2g.paths import reviewed_names
+    names = reviewed_names(photos, json.loads(args.project_names.read_text(encoding="utf-8"))) if args.project_names else run_names(photos)
     experiment = resolve_experiment(args.experiment, required=True, parser=ap)
     root = args.output_dir.expanduser().resolve() if args.output_dir else REPO_ROOT / "output"
     base = root / experiment

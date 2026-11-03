@@ -272,6 +272,8 @@ def fit(args, root):
     cleaning = clean(params, views, refined, cfg)
     final = root / "final"
     final.mkdir(exist_ok=True)
+    from i2g.batch_outputs import write_png_pair
+    write_png_pair(args.source_image or root / "frames/frame_0000.png", final_path(args, root, "character.ply"))
     export_ply(params, final_path(args, root, "character.ply"))
     torch.save({k:v.detach().cpu() for k,v in params.items()}, final_path(args, root, "splats.pt"))
     progress("export", .15, "PLY saved; evaluating reconstructed views")

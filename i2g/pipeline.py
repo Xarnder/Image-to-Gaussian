@@ -530,6 +530,8 @@ def _train_and_export(paths: RunPaths, opts: RunOptions, cfg, world: dict, regis
         export_ply(params, paths.stage_dir(stage) / "character_unbaked.ply")   # the bake can be redone from this
         report["face_bake"] = bake_face_into(params, world, paths.stage_dir("ingest") / "source_hr_rgba.png", cfg)
     bar.update(1)
+    from .batch_outputs import write_png_pair
+    write_png_pair(opts.input_image, paths.deliverable("character.ply"))
     export_ply(params, paths.deliverable("character.ply"))
     paths.clear_legacy("character.ply")
     bar.update(1)

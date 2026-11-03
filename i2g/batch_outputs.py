@@ -6,6 +6,27 @@ import uuid
 from pathlib import Path
 
 
+def write_png_pair(source, ply):
+    """Publish a full-resolution PNG beside the final PLY."""
+    import shutil
+    from PIL import Image, ImageOps
+    from tempfile import NamedTemporaryFile
+    target = Path(ply).with_suffix('.png')
+    with NamedTemporaryFile(dir=target.parent, delete=False, suffix='.tmp') as tmp:
+        temporary = Path(tmp.name)
+    try:
+        with Image.open(source) as image:
+            if image.format == 'PNG':
+                shutil.copyfile(source, temporary)
+            else:
+                oriented = ImageOps.exif_transpose(image)
+                oriented.convert('RGBA' if 'A' in oriented.getbands() else 'RGB').save(temporary, 'PNG')
+        temporary.replace(target)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return target
+
+
 def linked_ply(final):
     try:
         target = Path(json.loads((final / 'ply_location.json').read_text())['path'])
@@ -27,13 +48,17 @@ def organize_ply(source, final, combined, enabled=True):
     destination = combined if enabled else final
     destination.mkdir(parents=True, exist_ok=True)
     target = destination / source.name
-    if source != target and target.exists():
+    if source != target and (target.exists() or target.with_suffix(".png").exists()):
         target = destination / f'{source.stem}_{uuid.uuid4().hex[:8]}.ply'
     moved = source != target
     if moved:
         source.rename(target)
+    moved_png = False
     link = final / (source.name + '.lnk')
     try:
+        if moved and source.with_suffix(".png").is_file():
+            source.with_suffix(".png").rename(target.with_suffix(".png"))
+            moved_png = True
         if enabled:
             _shortcut(link, target)
             (final / 'ply_location.json').write_text(json.dumps({'path': str(target)}), encoding='utf-8')
@@ -43,6 +68,8 @@ def organize_ply(source, final, combined, enabled=True):
             if not enabled or old != link:
                 old.unlink()
     except Exception:
+        if moved_png:
+            target.with_suffix(".png").rename(source.with_suffix(".png"))
         if moved:
             target.rename(source)
         raise

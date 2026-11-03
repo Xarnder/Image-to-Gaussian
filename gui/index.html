@@ -6,20 +6,16 @@
   <title>Image-to-Gaussian</title>
   <style>
     :root {
-      --bg: #121417;
-      --panel: #1b1f24;
-      --line: #2c333c;
-      --text: #e8edf2;
-      --muted: #9aa6b2;
-      --accent: #3dd68c;
-      --accent-dim: #1f6f4a;
-      --warn: #e7c06a;
-      --bad: #e06c75;
-      --console: #0d0f12;
+      color-scheme:dark;
+      --control:#020710; --control-hover:#050c17; --bg:#060f20; --panel:rgba(4,14,31,.96); --line:rgba(149,184,217,.26);
+      --text:#edf5ff; --muted:#adc2da; --accent:#9bc7f4; --accent-dim:#285481;
+      --warn:#ffd087; --bad:#ffa0b7; --console:#081626;
+      --glass-edge:linear-gradient(135deg,rgba(244,249,255,.47),rgba(135,170,204,.13) 42%,rgba(113,157,201,.30));
+      --glow:0 0 16px rgba(104,159,214,.24); --radius:16px;
     }
     * { box-sizing: border-box; }
     html, body { margin: 0; min-height: 100vh; background: var(--bg); color: var(--text);
-      font: 14px/1.45 "Segoe UI", system-ui, sans-serif; }
+      font: 14px/1.5 Inter, "Aptos", "Segoe UI", system-ui, sans-serif; }
     body { overflow-x: hidden; overflow-y: auto; }
     header { padding: 16px 20px 8px; }
     h1 { margin: 0 0 4px; font-size: 18px; font-weight: 650; }
@@ -38,7 +34,7 @@
     .prog-meta { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .prog-pct { font-variant-numeric: tabular-nums; font-weight: 650; color: var(--text); }
     .bar {
-      height: 12px; background: #2a323b; border: 1px solid var(--line); border-radius: 999px; overflow: hidden;
+      height: 26px; background: #2a323b; border: 1px solid var(--line); border-radius: 999px; overflow: hidden;
     }
     .bar > span {
       display: block; height: 100%; width: 0%; background: linear-gradient(90deg, var(--accent-dim), var(--accent));
@@ -65,8 +61,8 @@
     .fail-panel .fail-hint b { color: var(--accent); font-weight: 650; }
     .fail-panel .fail-meta { margin-top: 8px; font-size: 12px; opacity: .8; }
     .fail-panel .fail-actions { margin-top: 10px; display: flex; gap: 8px; flex-wrap: wrap; }
-    .fail-panel .fail-actions button { background: #5a2028; color: #ffd6da; }
-    .fail-panel.vram .fail-actions button { background: #5a4020; color: #fff0d0; }
+    .fail-panel .fail-actions button { background: var(--control); color: #ffd6da; }
+    .fail-panel.vram .fail-actions button { background: var(--control); color: #fff0d0; }
     .folder-row {
       margin-top: 10px; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px;
     }
@@ -110,10 +106,13 @@
       grid-template-areas:
         "run stages"
         "candidates candidates"
+        "rate rate"
         "preview console";
       align-items: stretch;
       gap: 16px; padding: 0 20px 32px;
     }
+    #training-rate-section {grid-area:rate;min-width:0}
+    body.console-full #training-rate-section {display:none}
     .controls { grid-area: run; overflow: visible; }
     #candidates-wrap, #generated-batch-results { grid-area: candidates; }
     #generated-batch-results[hidden] { display: none; }
@@ -129,6 +128,7 @@
       grid-template-areas:
         "preview stages"
         "candidates candidates"
+        "rate rate"
         "console console";
     }
     body.run-collapsed .controls { display: none; }
@@ -138,13 +138,15 @@
       grid-template-areas:
         "run stages"
         "candidates candidates"
+        "rate rate"
         "preview preview";
     }
     body.run-collapsed.console-collapsed main {
       grid-template-columns: minmax(420px, 1.2fr) minmax(340px, 0.9fr);
       grid-template-areas:
         "preview stages"
-        "candidates candidates";
+        "candidates candidates"
+        "rate rate";
     }
     body.console-collapsed #console { display: none; }
     body.console-collapsed #console-wrap { min-height: 0; }
@@ -176,6 +178,7 @@
         grid-template-areas:
           "run"
           "candidates"
+          "rate"
           "preview"
           "stages"
           "console";
@@ -188,6 +191,7 @@
         grid-template-areas:
           "preview"
           "candidates"
+          "rate"
           "stages"
           "console";
       }
@@ -195,6 +199,7 @@
         grid-template-areas:
           "run"
           "candidates"
+          "rate"
           "preview"
           "stages"
           "console";
@@ -243,17 +248,17 @@
       border: 0; border-radius: 6px; padding: 8px 12px; font: inherit; font-weight: 600; cursor: pointer;
       background: #2a323b; color: var(--text);
     }
-    button:hover { filter: brightness(1.08); }
+
     button.primary { background: var(--accent); color: #062415; }
-    button.danger { background: var(--bad); color: #1a0608; }
-    button.stop-after { background: #6b5420; color: #fff6d8; }
+    button.danger { background:var(--control);color:var(--bad);border-color:var(--bad); }
+    button.stop-after { background:var(--control);color:var(--warn);border-color:#967746; }
     button:disabled { opacity: .45; cursor: not-allowed; }
     .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; align-items: center; }
     .stop-banner {
       display: none; margin-top: 8px; padding: 8px 10px; border-radius: 6px;
       background: #3a2e14; border: 1px solid var(--warn); color: var(--warn); font-size: 13px;
     }
-    button.stop-after[aria-pressed="true"] {opacity:1;background:#775c19;color:white}
+    button.stop-after[aria-pressed="true"] {opacity:1;background:var(--control);color:var(--warn);border-color:var(--warn)}
     .stop-banner.show { display: block; }
     .stop-banner.now { background: #3a1418; border-color: var(--bad); color: #f0b4b8; }
     .hint { color: var(--muted); font-size: 12px; margin-top: 8px; }
@@ -364,7 +369,7 @@
     .stage-list li.done .timing { color: var(--accent); }
     .stage-list li.failed .timing { color: #f0b4b8; }
     .stage-list .mini {
-      height: 4px; background: #2a323b; border-radius: 99px; overflow: hidden; margin-top: 6px;
+      height: 12px; background: #2a323b; border-radius: 99px; overflow: hidden; margin-top: 6px;
     }
     .stage-list .mini > span { display: block; height: 100%; width: 0; background: var(--warn); }
     .stage-list li.done .dot { background: var(--accent); border-color: var(--accent); }
@@ -454,7 +459,7 @@
     #batch-viewer {position:fixed;inset:0;margin:0;width:100%;height:100%;max-width:none;max-height:none;box-sizing:border-box;border:0;padding:0;background:#101215;color:#fff}
     #batch-viewer[open] {display:grid;grid-template-rows:minmax(0,1fr) auto}
     #batch-photo {width:100%;height:100%;object-fit:contain}
-    #batch-viewer button {position:absolute;background:#20242bed;color:white;padding:.6em 1em}
+    #batch-viewer button {position:absolute;background:var(--control);color:white;padding:.6em 1em}
     #batch-prev,#batch-next {top:45%;font-size:22px}
     #batch-prev {left:12px} #batch-next,#batch-close {right:12px} #batch-close {top:12px}
     #batch-footer {display:flex;gap:6px 16px;align-items:center;flex-wrap:wrap;padding:7px 14px;background:#23272d;font-size:13px}
@@ -483,15 +488,209 @@
       .batch-tools button,.batch-results-table button,#batch-viewer button,#staged-images button {min-height:44px;min-width:44px}
       #batch-footer {max-height:30vh;overflow:auto;padding-bottom:max(8px,env(safe-area-inset-bottom))}
     }
+
+    /* Ambient light stays behind the workspace and never receives input. */
+    body {isolation:isolate;background:linear-gradient(145deg,#061327 0%,#0a2241 55%,#040e1f 100%)}
+    .atmosphere {position:fixed;inset:0;z-index:-1;overflow:hidden;pointer-events:none}
+    .atmosphere i {position:absolute;width:68vmax;height:68vmax;border-radius:50%;
+      background:radial-gradient(circle,var(--orb) 0%,transparent 67%);
+      animation:orb-drift 37s ease-in-out infinite alternate}
+    .atmosphere i:nth-child(1) {--orb:#1b4e805c;top:-37vmax;left:-21vmax}
+    .atmosphere i:nth-child(2) {--orb:#18457467;top:-18vmax;right:-30vmax;animation-delay:-18s;animation-duration:49s}
+    .atmosphere i:nth-child(3) {--orb:#23548550;bottom:-39vmax;left:17%;animation-delay:-10s;animation-duration:43s}
+    @keyframes orb-drift {from{transform:translate(-3%,0)}to{transform:translate(9%,8%)}}
+    header {display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;
+      gap:3px 14px;margin:16px 20px;padding:18px 22px}
+    .brand-orbit {grid-area:1/1/3/2;width:54px;height:54px;color:var(--accent)}
+    h1 {grid-area:1/2;font-size:clamp(22px,2.4vw,34px);line-height:1.1;letter-spacing:-.035em}
+    header .sub {grid-area:2/2}
+    header .history-button {grid-area:1/3/3/4;display:inline-flex;align-items:center;justify-content:center;min-height:44px;padding:8px 15px;border-radius:9px;text-decoration:none;font-weight:650}
+    header,section,.history-card,#candidate-gallery article,#reset-confirm,#batch-additions {
+      border:1px solid transparent;border-radius:var(--radius);
+      background:linear-gradient(128deg,rgba(6,19,39,.95),var(--panel)) padding-box;
+      border-color:var(--line);border-top-color:rgba(238,242,255,.43);
+      -webkit-backdrop-filter:blur(18px);backdrop-filter:blur(18px);
+      box-shadow:0 8px 25px rgba(3,4,18,.27)}
+    @supports (mask-composite:exclude) {
+      header,section,.history-card,#candidate-gallery article,#reset-confirm,#batch-additions {position:relative}
+      :is(header,section,.history-card,#candidate-gallery article,#reset-confirm,#batch-additions)::before {
+        content:"";position:absolute;inset:-1px;padding:1px;border-radius:inherit;pointer-events:none;
+        background:var(--glass-edge);mask:linear-gradient(#fff 0 0) content-box,linear-gradient(#fff 0 0);mask-composite:exclude}
+    }
+    .history-card,#candidate-gallery article,#reset-confirm {padding:14px;overflow-wrap:anywhere}
+    #reset-confirm {margin-top:12px}
+    h2 {letter-spacing:-.025em}
+    input[type=text],input[type=number],input[type=search],select,#custom-prompt {
+      border:1px solid var(--line);border-radius:9px;background:var(--control);color:var(--text);padding:8px 10px;font:inherit}
+    select option,.help .tip {background:var(--control);color:var(--text)}
+    input[type=checkbox] {
+      appearance:none;display:inline-grid;place-content:center;vertical-align:middle;
+      width:24px;height:24px;flex:none;margin:2px 6px 2px 0;border-radius:7px;
+      border:1px solid #7498bc;background:#102940;cursor:pointer;
+    }
+    input[type=checkbox]:checked {background:#9bc7f4;border-color:#bcdcff}
+    input[type=checkbox]:checked::after {
+      content:"";width:6px;height:12px;border:solid #0b2540;border-width:0 3px 3px 0;
+      transform:translateY(-1px) rotate(45deg)
+    }
+    input[type=checkbox]:disabled {opacity:.55;cursor:not-allowed}
+    @media(forced-colors:active) {
+      input[type=checkbox] {appearance:auto}
+      input[type=checkbox]:checked::after {content:none}
+    }
+    input {accent-color:var(--accent)}
+    button,.history-button,input[type=file]::file-selector-button {
+      border:1px solid #496b90;border-radius:9px;padding:7px 11px;color:var(--text);
+      background:var(--control);
+      transition:border-color .15s,box-shadow .15s}
+    button.primary,.viewer-tabs button.active,.console-actions button[aria-pressed=true] {
+      color:#f0f7ff;background:var(--control);border-color:#7099be}
+    #browse,#stage-file,#stage-folder {border-color:#4c7296;background:var(--control)}
+    @media(hover:hover) {
+      button:enabled:hover,input[type=file]:hover::file-selector-button {border-color:#92bbe2;box-shadow:var(--glow)}
+      .history-button:hover {background:var(--control-hover);border-color:#92bbe2;color:#fff;box-shadow:var(--glow)}
+    }
+    :focus-visible {outline:2px solid var(--accent);outline-offset:3px}
+    .bar,.stage-list .mini {background:#0c2138}
+    .bar.char>span {background:linear-gradient(90deg,#285681,#88b8df)}
+    .photos li.current {background:#163748}
+    #batch-footer,.lightbox-bar {background:#051226}
+    .batch-results-table th {border-bottom-color:var(--line)}
+    input[type=range] {
+      appearance:none;-webkit-appearance:none;box-sizing:border-box;width:100%;height:44px;
+      padding:0 6px;background:transparent;cursor:pointer}
+    input[type=range]::-webkit-slider-runnable-track {
+      height:20px;border-radius:99px;padding:0 5px;background:linear-gradient(90deg,#234461,#315b7e)}
+    input[type=range]::-webkit-slider-thumb {
+      appearance:none;-webkit-appearance:none;box-sizing:border-box;width:12px;height:12px;margin-top:4px;
+      border-radius:50%;background:#effaff;border:1px solid #a6eaff}
+    input[type=range]::-moz-range-track {height:20px;border-radius:99px;background:linear-gradient(90deg,#234461,#315b7e)}
+    input[type=range]::-moz-range-progress {height:20px;border-radius:99px;background:#39698d}
+    input[type=range]::-moz-range-thumb {box-sizing:border-box;width:12px;height:12px;border-radius:50%;border:1px solid #a6eaff;background:#effaff}
+    @media(max-width:620px) {
+      header {margin:12px;padding:14px;grid-template-columns:auto minmax(0,1fr);gap:5px 10px}
+      header .history-button {grid-area:3/2;justify-self:start}
+      .brand-orbit {width:40px;height:40px}
+    }
+    @media(prefers-reduced-motion:reduce) {
+      .atmosphere i {animation:none}
+      button,.bar>span {transition:none}
+    }
+    #section-nav {background:var(--panel);color:var(--text);z-index:20;border:1px solid var(--line)}
+    #section-nav strong {font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
+    #section-links a {display:block;padding:9px 12px;border-radius:8px;color:var(--text);text-decoration:none}
+    #section-links a:hover,#section-links a:focus-visible {background:#214467;color:#fff}
+    #section-links a[hidden] {display:none}
+    body.console-full #section-nav {display:none}
+    @media(min-width:1200px) {
+      body:not(.console-full) {padding-left:182px}
+      #section-nav {position:fixed;inset:16px auto 16px 10px;width:166px;padding:16px 8px;border-radius:14px;overflow:auto}
+      #section-nav strong {display:block;margin:0 12px 12px}
+      #section-picker {display:none}
+    }
+    @media(max-width:1199px) {
+      #section-nav {position:sticky;top:0;display:flex;align-items:center;gap:12px;padding:7px 12px}
+      #section-links {display:none}
+      #section-picker {width:auto;flex:1;max-width:320px}
+      #run-status,main section,#splat-history {scroll-margin-top:66px}
+    }
+    :root {--panel-pad:clamp(14px,1.6vw,24px);--field-pad:10px 13px}
+    section,.history-card,#candidate-gallery article,#reset-confirm,#batch-additions {padding:var(--panel-pad)}
+    section > h2:first-child {margin-top:0}
+    .controls label,.controls .lbl {margin-block:12px 6px}
+    .controls .checks label {margin:0}
+    .hint {line-height:1.55}
+    input[type=text],input[type=number],input[type=search],select,#custom-prompt {padding:var(--field-pad)}
+    button {padding:9px 14px}
+    .queue-head button,.viewer-tabs button,.console-actions button,.batch-results-table button {padding:7px 11px}
+    .photos li,.stage-list li {padding:10px}
+    #console {padding:14px}
+    #batch-footer,.lightbox-bar {padding:10px 16px}
+    #section-links {display:grid;gap:4px}
+    #section-links a {padding:11px 12px}
+    #section-links a[aria-current="location"] {outline:2px solid #75b9ff;outline-offset:-2px;background:#122f50;color:#f2f8ff}
+    @media(max-width:1199px) {#section-links {display:none}}
+    @media(max-width:700px) {
+      main {padding-inline:12px}
+      .batch-results-table tr {padding:12px;gap:8px}
+      .batch-results-table td {padding:4px}
+      #batch-footer {padding-bottom:max(10px,env(safe-area-inset-bottom))}
+      .queue-head button,.viewer-tabs button,.console-actions button,.batch-results-table button {min-height:44px}
+    }
+    .folder-row {margin-block:18px 12px;gap:14px 20px}
+    .folder-row .run-toolbar {gap:10px;flex-wrap:wrap}
+    #reset-confirm:not([hidden]) {display:grid;gap:20px;max-width:680px;padding:clamp(20px,3vw,32px);margin-block:18px}
+    #reset-confirm h2 {margin:0 0 8px;font-size:18px}
+    #reset-confirm p {margin:0;line-height:1.55;color:var(--muted)}
+    #reset-confirm label {margin:0 0 8px;font-size:14px;color:var(--text)}
+    #reset-confirm input {min-height:44px}
+    .reset-actions {display:flex;flex-wrap:wrap;gap:12px;padding-top:16px;border-top:1px solid var(--line)}
+    .reset-actions button {min-height:44px;padding-inline:18px}
+    #reset-error:empty {display:none}
+    @media(max-width:480px) {.reset-actions button {flex:1 1 8rem}}
+    body:not(.console-full) {overflow:visible}
+    html {overflow-x:clip}
+    #pinned-progress {
+      --pin-gap:10px;
+      position:sticky;top:calc(var(--sticky-nav-height,0px) + var(--pin-gap));z-index:18;
+      margin:var(--pin-gap) clamp(12px,2vw,28px) 20px;
+      padding:clamp(14px,1.5vw,22px) clamp(16px,2vw,28px);
+      border:1px solid var(--line);border-top-color:#496887;border-radius:18px;
+      background:linear-gradient(135deg,#0b2037,#051326 75%);
+      box-shadow:0 5px 16px rgba(2,8,18,.32);
+    }
+    #pinned-progress .prog:last-child {margin-bottom:0}
+    #run-status,main section,#splat-history {scroll-margin-top:calc(var(--sticky-nav-height,0px) + var(--sticky-bars-height,0px) + 10px)}
+    #reset-confirm label strong {text-decoration:underline;text-underline-offset:.18em}
+    #name-review {width:min(600px,92vw);max-height:85vh;padding:20px;background:#07172b;color:var(--text);border:1px solid var(--line);border-radius:14px}
+    #name-review::backdrop {background:#000a}
+    #name-review-list {max-height:44vh;overflow:auto;padding:0 8px 8px}
+    #name-review-list label {display:grid;grid-template-columns:42px minmax(0,1fr);gap:4px 10px;align-items:center;overflow-wrap:anywhere}
+    #name-review-list img {grid-row:span 2;width:42px;height:50px;object-fit:contain}
+    #stage-source:not([hidden]) {display:flex;align-items:center;gap:16px;margin:16px 0;padding:12px;background:var(--control);border:1px solid var(--line);border-radius:12px}
+    #stage-source-button {padding:3px;flex:none}
+    #stage-source-img {display:block;width:clamp(76px,9vw,128px);height:clamp(88px,11vw,144px);object-fit:contain}
+    #stage-source-name {display:block;overflow-wrap:anywhere}
+    #stage-source small {color:var(--accent)}
+    #stage-enlarged {width:96vw;height:94vh;background:#071324;color:var(--text);border:1px solid var(--line);border-radius:14px}
+    #stage-enlarged img {width:100%;height:calc(100% - 48px);object-fit:contain}
+    #stage-enlarged::backdrop {background:#000b}
+    #stage-list li {grid-template-columns:42px 10px minmax(0,1fr);gap:12px;padding:14px 10px}
+    #stage-list .n {display:grid;place-items:center;border:1px solid var(--line);background:var(--control);border-radius:10px;height:40px;font-size:23px;font-weight:700;padding:0}
+    #stage-list .running .n {color:var(--warn);border-color:var(--warn)}
+    #stage-list .title {font-size:15px}
+    #stage-list .dot {margin-top:6px}
     </style>
 </head>
 <body>
+  <div class="atmosphere" aria-hidden="true"><i></i><i></i><i></i></div>
+  <nav id="section-nav" aria-label="Page sections">
+    <strong>On this page</strong>
+    <div id="section-links">
+      <a href="#run-status">Status</a>
+      <a href="#run-settings">Run settings</a>
+      <a href="#stage-wrap">Stages</a>
+      <a href="#candidates-wrap" hidden>Video candidates</a>
+      <a href="#generated-batch-results" hidden>Automated batch</a>
+      <a href="#training-rate-section">Training speed</a>
+      <a href="#viewer-wrap">Preview</a>
+      <a href="#console-wrap">Console</a>
+      <a href="#splat-history">Splat history</a>
+    </div>
+    <select id="section-picker" aria-label="Jump to a section"><option value="">Jump to section…</option></select>
+  </nav>
   <header>
+    <svg class="brand-orbit" viewBox="0 0 60 60" fill="none" aria-hidden="true">
+      <circle cx="30" cy="30" r="13" fill="#4779a5" opacity=".3"/>
+      <ellipse cx="30" cy="30" rx="26" ry="11" transform="rotate(-32 30 30)" stroke="currentColor" stroke-width="1.7"/>
+      <ellipse cx="30" cy="30" rx="13" ry="24" transform="rotate(-32 30 30)" stroke="#92bde5" stroke-width="1.4"/>
+      <circle cx="30" cy="30" r="4" fill="#daeaff"/><circle cx="49" cy="14" r="2.5" fill="currentColor"/>
+    </svg>
     <h1>Image-to-Gaussian</h1>
-    <a href="#splat-history" style="float:right;color:var(--accent)" onclick="document.getElementById('splat-history').open=true">View splat history</a>
+    <a class="history-button" href="#splat-history" onclick="document.getElementById('splat-history').open=true">View splat history</a>
     <div class="sub">From one photo or an approved orbit video to a static Gaussian splat.</div>
   </header>
-  <div class="progress-wrap">
+  <div class="progress-wrap" id="pinned-progress" role="region" aria-label="Live progress">
     <div class="prog">
       <div class="prog-head">
         <span class="prog-label">Batch</span>
@@ -516,6 +715,8 @@
       </div>
       <div class="bar stage" aria-label="Stage progress"><span id="bar-stage"></span></div>
     </div>
+  </div>
+  <div class="progress-wrap" id="run-status">
     <div class="now">
       <div class="label">Status</div>
       <div id="current">Waiting</div>
@@ -534,11 +735,7 @@
       <span id="stage-feedback" role="status"></span>
     </details>
     <section>
-      <details id="rate-panel" open>
-        <summary><strong>Gaussian training speed</strong></summary>
-        <p id="rate-summary" class="hint">Waiting for training samples…</p>
-        <canvas id="rate-chart" style="display:block;width:100%;height:clamp(155px,22vw,240px)" role="img" aria-label="Training steps per second over elapsed time"></canvas>
-      </details>
+
       <label><input type="checkbox" id="live-training"> Show live Gaussian training preview</label>
       <p class="hint">Updating this preview can slow training. Turn it off to stop capturing frames.</p>
       <figure id="live-training-panel" hidden>
@@ -562,13 +759,17 @@
     </div>
     <p id="folder-feedback" role="status" aria-live="polite"></p>
     <p id="coverage-note" role="status" hidden></p>
-    <div id="reset-confirm" hidden style="padding:16px; margin-top:12px; border:1px solid #546174; border-radius:10px; background:#1b222a">
-      <strong>Reset for a new video and project?</strong>
+    <div id="reset-confirm" role="region" aria-labelledby="reset-heading" hidden>
+      <div><h2 id="reset-heading">Reset for a new project?</h2>
       <p>This clears the current session. Your splat history, cached thumbnails, saved PLY files and recipe settings are kept.</p>
-      <label for="reset-phrase">Type <strong>Confirm Reset</strong> to enable the reset button.</label>
+      </div>
+      <div><label for="reset-phrase">Type <strong>Confirm Reset</strong> to enable the reset button.</label>
       <input id="reset-phrase" type="text" autocomplete="off" spellcheck="false">
+      </div>
+      <div class="reset-actions">
       <button type="button" id="reset-submit" disabled>Reset session</button>
       <button type="button" id="reset-cancel">Cancel</button>
+      </div>
       <span id="reset-error" role="alert"></span>
     </div>
     <div class="stop-banner" id="stop-banner" role="status"></div>
@@ -587,7 +788,7 @@
     </div>
   </div>
   <main>
-    <section class="controls">
+    <section class="controls" id="run-settings">
       <div class="viewer-head">
         <h2>Run</h2>
         <button type="button" class="compact" id="run-hide" hidden title="Hide the Run panel and show the preview">Hide</button>
@@ -663,7 +864,7 @@
       </div>
       <label for="experiment">Experiment name or number</label>
       <input id="experiment" type="text" placeholder="3  or  face-v2" spellcheck="false">
-      <div class="hint" id="experiments"></div>
+      <div class="hint"><span id="experiments"></span> <button type="button" id="toggle-experiments" aria-controls="experiments" aria-expanded="false" hidden>Show more</button></div>
       <div id="image-options">
       <label class="lbl" for="preset">Preset
         <span class="help" tabindex="0" aria-label="What presets mean">?<span class="tip">
@@ -750,6 +951,13 @@
       <p id="batch-counts" class="hint" role="status"></p>
       <div class="batch-table-scroll"><table class="batch-results-table"><thead><tr><th scope="col">Preview</th><th scope="col">Original image</th><th scope="col">Status</th><th scope="col">Project / output</th><th scope="col">Started</th><th scope="col">Finished</th><th scope="col">Duration</th></tr></thead><tbody id="generated-batch-items"></tbody></table></div>
     </section>
+    <section id="training-rate-section">
+      <details id="rate-panel" open>
+        <summary><strong>Gaussian training speed</strong></summary>
+        <p id="rate-summary" class="hint">Waiting for training samples…</p>
+        <canvas id="rate-chart" style="display:block;width:100%;height:clamp(155px,22vw,240px)" role="img" aria-label="Training steps per second over elapsed time"></canvas>
+      </details>
+    </section>
     <section id="viewer-wrap">
       <div class="viewer-head">
         <h2>Preview</h2>
@@ -771,6 +979,10 @@
       <div class="viewer-head">
         <h2>Stages</h2>
         <span class="hint" id="stage-plan-caption">standard</span>
+      </div>
+      <div id="stage-source" hidden>
+        <button id="stage-source-button" type="button" aria-label="Enlarge current image"><img id="stage-source-img" alt=""></button>
+        <div><small>Current image</small><strong id="stage-source-name"></strong><span class="hint">Select the thumbnail to enlarge</span></div>
       </div>
       <div class="stage-legend">
         <span><i class="lg-done"></i> Done</span>
@@ -803,6 +1015,20 @@
       <div id="history-results" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,230px),1fr));gap:12px"></div>
     </details>
   </section>
+  <dialog id="stage-enlarged" aria-label="Current image enlarged">
+    <button type="button" id="stage-close">Close ×</button>
+    <img id="stage-enlarged-img" alt="Current source image">
+  </dialog>
+  <dialog id="name-review" aria-labelledby="name-review-title">
+    <form method="dialog">
+      <h2 id="name-review-title">Use these project names?</h2>
+      <p>Review or edit each name before starting. Each project and its final PLY and PNG will use the name you confirm. Your original files keep their names.</p>
+      <div id="name-review-list"></div>
+      <p id="name-review-error" role="alert"></p>
+      <div class="actions"><button type="button" id="cancel-name-review">Cancel</button>
+        <button class="primary" value="start">Save names and start batch</button></div>
+    </form>
+  </dialog>
   <dialog id="batch-viewer" aria-label="Batch image viewer">
     <img id="batch-photo" alt="">
     <button type="button" id="batch-prev" aria-label="Previous batch image">‹</button>
@@ -833,6 +1059,95 @@
   </div>
   <script>
     const $ = (id) => document.getElementById(id);
+    const sectionLinks = Array.from($("section-links").querySelectorAll("a"));
+    const sectionPicker = $("section-picker");
+    let pinnedHeight = 0;
+    function measurePinnedProgress() {
+      const nav = $("section-nav");
+      const navHeight = getComputedStyle(nav).position === "sticky" ? nav.offsetHeight : 0;
+      const bars = $("pinned-progress");
+      const barsHeight = bars.offsetHeight + parseFloat(getComputedStyle(bars).getPropertyValue("--pin-gap"));
+      document.documentElement.style.setProperty("--sticky-nav-height",navHeight+"px");
+      document.documentElement.style.setProperty("--sticky-bars-height",barsHeight+"px");
+      pinnedHeight = navHeight + barsHeight;
+    }
+    const stickyObserver = new ResizeObserver(measurePinnedProgress);
+    stickyObserver.observe($("section-nav"));
+    stickyObserver.observe($("pinned-progress"));
+    measurePinnedProgress();
+    let preferredSection = location.hash.slice(1);
+    let sectionFrame = 0;
+    function updateCurrentSection() {
+      sectionFrame = 0;
+      if (document.body.classList.contains("console-full")) return;
+      const readingLine = Math.max(pinnedHeight + 12, Math.min(160, innerHeight * 0.22));
+      let best = null, bestScore = Infinity;
+      const bottom = scrollY > 0 && scrollY + innerHeight >= document.documentElement.scrollHeight - 2;
+      for (const link of sectionLinks) {
+        const id = link.hash.slice(1);
+        const rect = $(id).getBoundingClientRect();
+        if (!rect.height || rect.bottom <= 0 || rect.top >= innerHeight) continue;
+        let score = Math.max(0,rect.top-readingLine,readingLine-rect.bottom);
+        // At a shared grid row, keep the panel the user selected or interacted with.
+        if (id === preferredSection) score -= 0.5;
+        if (bottom && id === "splat-history") score = -2;
+        if (score < bestScore) {best = link; bestScore = score;}
+      }
+      if (!best) return;
+      for (const link of sectionLinks) {
+        if (link === best) {
+          if (!link.hasAttribute("aria-current")) link.setAttribute("aria-current","location");
+        } else if (link.hasAttribute("aria-current")) link.removeAttribute("aria-current");
+      }
+      if (document.activeElement !== sectionPicker) sectionPicker.value = best.hash.slice(1);
+    }
+    function scheduleSectionUpdate() {
+      if (!sectionFrame) sectionFrame = requestAnimationFrame(updateCurrentSection);
+    }
+    addEventListener("scroll",scheduleSectionUpdate,{passive:true});
+    addEventListener("resize",scheduleSectionUpdate);
+    const sectionSizeObserver = new ResizeObserver(scheduleSectionUpdate);
+    for (const link of sectionLinks) sectionSizeObserver.observe($(link.hash.slice(1)));
+    function preferInteractedSection(event) {
+      const link = sectionLinks.find(link => $(link.hash.slice(1)).contains(event.target));
+      if (link) {preferredSection = link.hash.slice(1); scheduleSectionUpdate();}
+    }
+    document.addEventListener("pointerdown",preferInteractedSection);
+    document.addEventListener("focusin",preferInteractedSection);
+    scheduleSectionUpdate();
+    function jumpToSection(id) {
+      preferredSection = id;
+      if (id === "run-settings" && document.body.classList.contains("run-collapsed")) {
+        runOpenedByUser = true;
+        setRunCollapsed(false);
+      }
+      if (id === "console-wrap" && document.body.classList.contains("console-collapsed")) setConsoleMode("normal");
+      if (id === "splat-history") $("splat-history").open = true;
+      const target = $(id);
+      target.tabIndex = -1;
+      target.focus({preventScroll:true});
+      target.scrollIntoView({block:"start",behavior:matchMedia("(prefers-reduced-motion: reduce)").matches ? "instant" : "smooth"});
+    }
+    for (const link of sectionLinks) {
+      const id = link.hash.slice(1);
+      const target = $(id);
+      const option = new Option(link.textContent,id);
+      sectionPicker.add(option);
+      function syncSection() {
+        link.hidden = target.hidden;
+        option.disabled = option.hidden = target.hidden;
+      }
+      syncSection();
+      new MutationObserver(syncSection).observe(target,{attributes:true,attributeFilter:["hidden"]});
+      link.onclick = event => {
+        if (event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
+        event.preventDefault(); jumpToSection(id);
+      };
+    }
+    sectionPicker.onchange = () => {
+      if (sectionPicker.value) jumpToSection(sectionPicker.value);
+      scheduleSectionUpdate();
+    };
     const consoleEl = $("console");
     let stickBottom = true;
     let barNode = null;
@@ -1462,7 +1777,41 @@
       });
     }
 
+    function updateStageSource(s) {
+      const g = generationState;
+      let path, label;
+      if (mode()==="generate" && generationMatchesForm()) {
+        const active = g.batch?.items?.find(item=>item.status==="running");
+        path = active?.input || g.input;
+      } else if (s?.mode==="video" && s.preview?.items?.some(item=>item.id==="frames") && s.work_dir) {
+        path = s.work_dir+"/frames/frame_0000.png";
+        label = s.preview.file;
+      } else {
+        const photo = s?.photos?.find(item=>item.current) || queue.find(item=>item.current);
+        const source = s?.preview?.items?.find(item=>item.id==="photo");
+        path = photo?.path || (source ? new URL(source.url,location.href).searchParams.get("p") : null)
+          || (s?.mode==="single" ? s.input : null);
+      }
+      const valid = path && /\.(png|jpe?g|bmp|webp|tiff?)$/i.test(path);
+      $("stage-source").hidden = !valid;
+      if (!valid) return;
+      const button = $("stage-source-button");
+      if (button.dataset.path !== path) {
+        button.dataset.path = path;
+        $("stage-source-img").src = batchImageUrl(path);
+      }
+      $("stage-source-name").textContent = label || path.split(/[\\/]/).pop();
+    }
+    $("stage-source-button").onclick = () => {
+      const path = $("stage-source-button").dataset.path;
+      if (generationState?.batch?.items?.some(item=>item.input===path)) {openBatchViewer(path); return;}
+      $("stage-enlarged-img").src = batchImageUrl(path);
+      $("stage-enlarged").showModal();
+      $("stage-close").focus();
+    };
+    $("stage-close").onclick = () => $("stage-enlarged").close();
     function applyStages(s) {
+      updateStageSource(s);
       const formPreset = $("preset").value || "standard";
       const formNoOrbit = $("no_orbit").checked;
       let rows;
@@ -1595,7 +1944,7 @@
       $("history-message").textContent = matches.length+" of "+historyItems.length+" saved splats";
       for (const item of matches) {
         const card = document.createElement("article");
-        card.style.cssText="padding:12px;border:1px solid #8886;border-radius:10px;overflow-wrap:anywhere";
+        card.className="history-card";
         if (item.thumbnail) {
           const image=document.createElement("img");
           image.loading="lazy"; image.alt=item.name; image.src=item.thumbnail;
@@ -1633,7 +1982,7 @@
       rateChart.width = width * ratio; rateChart.height = height * ratio;
       const ctx = rateChart.getContext("2d");
       ctx.scale(ratio,ratio);
-      const left=46, right=width-16, top=16, bottom=height-34;
+      const left=46, right=width-16, top=32, bottom=height-34;
       const end=Math.max(1,trainingRates.at(-1)?.[0] || 0);
       const peak=Math.max(1,...trainingRates.map(sample=>sample[2]));
       ctx.font="12px system-ui"; ctx.fillStyle=getComputedStyle(rateChart).color;
@@ -2602,7 +2951,21 @@
     $("append-staged").onclick = async () => {
       stagingBusy = true; renderStaged();
       try {
-        const result = await post("/api/generation/append",{batch_id:stagingBatch,photos:stagedImages});
+        const batchId = stagingBatch;
+        const photos = [...stagedImages];
+        const reserved = generationState.batch.items.map(item=>item.name.toLowerCase());
+        const used = new Set(reserved);
+        const items = photos.map(path=>{
+          const file = path.split(/[\\/]/).pop();
+          const stem = file.replace(/\.[^.]+$/, "");
+          let name = stem;
+          for(let suffix=2;used.has(name.toLowerCase());suffix++) name=stem+"_"+suffix;
+          used.add(name.toLowerCase());
+          return {file,path,name};
+        });
+        const project_names = await reviewProjectNames(items,true,reserved);
+        if (!project_names) return;
+        const result = await post("/api/generation/append",{batch_id:batchId,photos,project_names});
         if (!result.ok) throw Error(result.error);
         stagedImages = [];
         $("stage-feedback").textContent = result.added+" added to the end of the queue.";
@@ -2838,6 +3201,39 @@
       setRunCollapsed(false);
     }
 
+    async function confirmBatchNames(payload) {
+      const data = await post("/api/batch-name-review", payload);
+      if (!data.ok) throw Error(data.error || "Could not load the images.");
+      return reviewProjectNames(data.items);
+    }
+    async function reviewProjectNames(items, appending=false, reserved=[]) {
+      const modal = $("name-review");
+      $("name-review-title").textContent = appending ? "Keep these image names for the new projects?" : "Use these project names?";
+      modal.querySelector("button[value=start]").textContent = appending ? "Save names and add to queue" : "Save names and start batch";
+      const list = $("name-review-list");
+      list.replaceChildren();
+      $("name-review-error").textContent = "";
+      const fields = items.map(item => {
+        const label = document.createElement("label");
+        const image = document.createElement("img");
+        image.loading = "lazy"; image.alt = ""; image.src = "/api/thumb?p="+encodeURIComponent(item.path);
+        const title = document.createElement("span"); title.textContent = item.file;
+        const field = document.createElement("input"); field.type="text"; field.required=true; field.value=item.name;
+        label.append(image,title,field); list.append(label);
+        return [item.path,field];
+      });
+      modal.querySelector("form").onsubmit = event => {
+        const names = fields.map(([,field])=>field.value.trim().toLowerCase());
+        if (names.some(name=>!name || reserved.includes(name)) || new Set(names).size !== names.length) {
+          event.preventDefault(); $("name-review-error").textContent="Give each image a unique project name.";
+        }
+      };
+      $("cancel-name-review").onclick=()=>modal.close("cancel");
+      modal.returnValue="";
+      const choice = new Promise(resolve=>modal.addEventListener("close",()=>resolve(modal.returnValue),{once:true}));
+      modal.showModal();
+      return await choice === "start" ? Object.fromEntries(fields.map(([path,field])=>[path,field.value.trim()])) : null;
+    }
     $("start").onclick = async () => {
       $("error").textContent = "";
       failDismissedKey = "";
@@ -2892,6 +3288,12 @@
           showStartError("Could not read that folder.");
           return;
         }
+      }
+      if (payload.mode === "batch" || payload.generation_batch) {
+        try {
+          payload.project_names = await confirmBatchNames(payload);
+          if (!payload.project_names) return;
+        } catch(error) { showStartError(error.message); return; }
       }
       $("start").disabled = true;
       $("current").textContent = "Starting…";
@@ -3068,7 +3470,16 @@
 
     fetch("/api/experiments").then((r) => r.json()).then((d) => {
       if (d.experiments && d.experiments.length) {
-        $("experiments").textContent = "Already in output\\: " + d.experiments.slice(0, 20).join(", ");
+        const names = d.experiments;
+        const toggle = $("toggle-experiments");
+        function displayNames(expanded) {
+          $("experiments").textContent = "Already in output: " + (expanded ? names : names.slice(0,3)).join(", ");
+          toggle.hidden = names.length <= 3;
+          toggle.textContent = expanded ? "Show less" : "Show more (" + (names.length - 3) + ")";
+          toggle.setAttribute("aria-expanded", String(expanded));
+        }
+        toggle.onclick = () => displayNames(toggle.getAttribute("aria-expanded") !== "true");
+        displayNames(false);
       }
     }).catch(() => {});
     fetch("/api/presets").then((r) => r.json()).then((d) => {

@@ -71,12 +71,15 @@ class GeneratedBatch:
                 raise ValueError("Enter an experiment name.")
             experiment = safe_run_name(body["experiment"])
             items = []
+            from .paths import reviewed_names
+            reviewed = reviewed_names(photos, body["project_names"], OUTPUT_DIR / experiment) if "project_names" in body else {}
             used = set()
             for source in photos:
                 name = safe_run_name(source.stem)
                 # Hash every ambiguous stem (including case/sanitization collisions).
                 if sum(safe_run_name(p.stem).casefold() == name.casefold() for p in photos) > 1:
                     name += "_" + hashlib.sha256(str(source.relative_to(folder)).encode()).hexdigest()[:10]
+                name = reviewed.get(source, name)
                 if name.casefold() in used:
                     raise ValueError("Duplicate image output names.")
                 used.add(name.casefold())
@@ -119,7 +122,7 @@ class GeneratedBatch:
             threading.Thread(target=self._run, args=(body, process), daemon=True).start()
             return {"ok": True}
 
-    def append(self, batch_id, photos):
+    def append(self, batch_id, photos, project_names=None):
         with self.lock:
             if (not self.state['active'] or self.state['status'] != 'running'
                     or self.after.is_set() or batch_id != self.state.get('batch_id')):
@@ -128,6 +131,8 @@ class GeneratedBatch:
             known = {Path(item['input']).resolve() for item in items}
             names = {item['name'].casefold() for item in items}
             experiment = safe_run_name(self.state['experiment'])
+            from .paths import reviewed_names
+            reviewed = reviewed_names(photos, project_names, OUTPUT_DIR / experiment) if project_names is not None else {}
             added = []
             for source in photos:
                 source = source.resolve()
@@ -135,8 +140,8 @@ class GeneratedBatch:
                     continue
                 if not source.is_file():
                     raise ValueError(f"Image no longer exists: {source}")
-                name = safe_run_name(source.stem)
-                if name.casefold() in names:
+                name = reviewed.get(source, safe_run_name(source.stem))
+                if not reviewed and name.casefold() in names:
                     name += '_' + hashlib.sha256(str(source).casefold().encode()).hexdigest()[:10]
                 if name.casefold() in names:
                     raise ValueError(f"Project name already in use: {name}")

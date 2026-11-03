@@ -35,6 +35,7 @@ LOGS_DIR = REPO_ROOT / "logs"
 # Final-folder files are written as <photo>-and-<experiment>-<kind>, e.g. alice-and-exp3-character.ply.
 OUTPUT_KINDS = (
     "character.ply",
+    "character.png",
     "turntable.mp4",
     "preview_8_angles.png",
     "photo_vs_render.png",
@@ -48,6 +49,32 @@ def safe_run_name(name: str) -> str:
     """Photo stem, --name, or --experiment as a Windows-safe folder/file piece."""
     cleaned = re.sub(r'[<>:"/\\|?*]', "_", name).strip(". ")
     return cleaned or "photo"
+
+
+def reviewed_names(photos, mapping, project_root=None):
+    if not isinstance(mapping, dict) or set(mapping) != {str(p.resolve()) for p in photos}:
+        raise ValueError("The batch contents changed. Review the project names again.")
+    names = {}
+    used = set()
+    for photo in photos:
+        name = mapping[str(photo.resolve())]
+        if (not isinstance(name, str) or not name or safe_run_name(name) != name or
+                any(ord(c) < 32 for c in name) or Path(name).is_reserved() or
+                name.casefold() in {"final_ply", ".splat_history"}):
+            raise ValueError(f"Choose a valid Windows project name for {photo.name}.")
+        if name.casefold() in used:
+            raise ValueError(f"Each image needs a unique project name: {name}")
+        if project_root:
+            project = project_root / name
+            for path, key in ((project / "video/output_naming.json", "source_image"),
+                              (project / "v2/00_ingest/ingest.json", "source")):
+                if path.is_file():
+                    existing = json.loads(path.read_text(encoding="utf-8")).get(key)
+                    if existing and Path(existing).resolve() != photo.resolve():
+                        raise ValueError(f"The project {name!r} already belongs to another image. Choose another name.")
+        used.add(name.casefold())
+        names[photo] = name
+    return names
 
 
 def deliverable_stem(run_name: str, experiment: str = "") -> str:
