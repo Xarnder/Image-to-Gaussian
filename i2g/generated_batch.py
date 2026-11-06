@@ -8,10 +8,20 @@ import uuid
 from pathlib import Path
 
 from .paths import OUTPUT_DIR, safe_run_name, deliverable_path, find_deliverable
-from .video_generation import write_json, generation_prompt
+from .video_generation import write_json, generation_prompt, SUBJECT_SECTIONS
 from .video_options import video_settings
 from .video_sizing import legacy_aspect_mismatch
 from .batch_outputs import organize_ply
+
+
+def reviewed_subjects(photos, mapping, default):
+    if mapping is None:
+        mapping = {str(p.resolve()): default for p in photos}
+    if not isinstance(mapping, dict) or set(mapping) != {str(p.resolve()) for p in photos}:
+        raise ValueError("Review a subject for every image in this selection.")
+    if any(value not in ("human", *SUBJECT_SECTIONS) for value in mapping.values()):
+        raise ValueError("Choose a valid subject type for each image.")
+    return mapping
 
 
 class GeneratedBatch:
@@ -19,6 +29,7 @@ class GeneratedBatch:
         self.lock = threading.RLock()
         self.cancel = threading.Event()
         self.after = threading.Event()
+        self.skip_input = None
         self.state = {"active": False, "items": []}
         self.manifest = None
         self.session_file = session_file
@@ -73,6 +84,7 @@ class GeneratedBatch:
             items = []
             from .paths import reviewed_names
             reviewed = reviewed_names(photos, body["project_names"], OUTPUT_DIR / experiment) if "project_names" in body else {}
+            subjects = reviewed_subjects(photos, body.get("project_subjects"), body.get("subject", "human"))
             used = set()
             for source in photos:
                 name = safe_run_name(source.stem)
@@ -84,7 +96,7 @@ class GeneratedBatch:
                     raise ValueError("Duplicate image output names.")
                 used.add(name.casefold())
                 final = deliverable_path(OUTPUT_DIR / experiment / name / "video" / "final", name, "character.ply", experiment)
-                items.append({"input": str(source), "name": name, "ply": str(final), "status": "queued"})
+                items.append({"input": str(source), "name": name, "subject": subjects[str(source.resolve())], "ply": str(final), "status": "queued"})
             self.cancel.clear(); self.after.clear()
             self.manifest = OUTPUT_DIR / experiment / "generated_batch.json"
             self.manifest.parent.mkdir(parents=True, exist_ok=True)
@@ -105,6 +117,8 @@ class GeneratedBatch:
             finished = 0
             for item in self.state["items"]:
                 final = OUTPUT_DIR / experiment / item["name"] / "video" / "final"
+                if item["status"] == "skipped_by_user":
+                    continue
                 if item["status"] in ("done", "skipped"):
                     ply = find_deliverable(final, item["name"], "character.ply", experiment)
                     if ply:
@@ -122,7 +136,7 @@ class GeneratedBatch:
             threading.Thread(target=self._run, args=(body, process), daemon=True).start()
             return {"ok": True}
 
-    def append(self, batch_id, photos, project_names=None):
+    def append(self, batch_id, photos, project_names=None, project_subjects=None):
         with self.lock:
             if (not self.state['active'] or self.state['status'] != 'running'
                     or self.after.is_set() or batch_id != self.state.get('batch_id')):
@@ -133,6 +147,7 @@ class GeneratedBatch:
             experiment = safe_run_name(self.state['experiment'])
             from .paths import reviewed_names
             reviewed = reviewed_names(photos, project_names, OUTPUT_DIR / experiment) if project_names is not None else {}
+            subjects = reviewed_subjects(photos, project_subjects, self.state["settings"].get("subject", "human"))
             added = []
             for source in photos:
                 source = source.resolve()
@@ -147,13 +162,38 @@ class GeneratedBatch:
                     raise ValueError(f"Project name already in use: {name}")
                 final = deliverable_path(OUTPUT_DIR / experiment / name / 'video' / 'final',
                                          name, 'character.ply', experiment)
-                added.append({'input': str(source), 'name': name, 'ply': str(final), 'status': 'queued'})
+                added.append({'input': str(source), 'name': name, 'subject': subjects[str(source)], 'ply': str(final), 'status': 'queued'})
                 known.add(source)
                 names.add(name.casefold())
             items.extend(added)
             self.state['total'] = len(items)
             self.save()
             return {'ok': True, 'added': len(added), 'duplicates': len(photos) - len(added)}
+
+    def change_subject(self, batch_id, source, subject):
+        with self.lock:
+            if not batch_id or batch_id != self.state.get("batch_id"):
+                raise ValueError("This batch has changed. Refresh the queue.")
+            item = next((row for row in self.state["items"] if row["input"] == source), None)
+            if not item or item["status"] != "queued":
+                raise ValueError("This image has already started. Its subject is locked.")
+            if subject not in ("human", *SUBJECT_SECTIONS):
+                raise ValueError("Choose a valid subject.")
+            item["subject"] = subject
+            self.save()
+            return {"ok": True}
+
+    def skip_current(self, batch_id, source):
+        with self.lock:
+            current = next((item for item in self.state["items"] if item["status"] == "running"), None)
+            if (not self.state["active"] or self.after.is_set() or
+                    batch_id != self.state.get("batch_id") or not current or current["input"] != source):
+                return {"ok": False, "error": "The current image changed or the batch is stopping."}
+            self.skip_input = source
+            self.cancel.set()
+            self.state["message"] = "Skipping current image. Waiting for processing to stop before continuing…"
+            self.save()
+            return {"ok": True}
 
     def stop(self, how="now"):
         self.after.set()
@@ -177,8 +217,10 @@ class GeneratedBatch:
                         break
                     item = self.state['items'][index]
                     index += 1
-                    if item["status"] in ("done", "skipped"):
+                    if item["status"] in ("done", "skipped", "skipped_by_user"):
                         continue
+                    self.skip_input = None
+                    item["status"] = "running"
                 existing = find_deliverable(Path(item["ply"]).parent, item["name"], "character.ply", body["experiment"])
                 final_dir = Path(item["ply"]).parent
                 timing_file = final_dir.parent / 'batch_timing.json'
@@ -197,18 +239,31 @@ class GeneratedBatch:
                         self.save()
                     continue
                 with self.lock:
-                    item["status"] = "running"
                     item['started_at'] = time.time()
                     self.state["message"] = f"Processing {item['name']} ({self.state['completed'] + 1}/{self.state['total']})"
                     self.save()
                 try:
-                    result = process(body | {"input": item["input"], "output_name": item["name"],
+                    default = body.get("subject", "human")
+                    subject = item.get("subject", default)
+                    result = process(body | {"subject": subject, "custom_prompt_enabled": subject == default and body.get("custom_prompt_enabled") is True,
+                                             "input": item["input"], "output_name": item["name"],
                                              "generation_policy": "first", "candidate_count": 1}, self.cancel)
                 except Exception as exc:
                     result = {"ok": False, "error": str(exc)}
                 with self.lock:
+                    if self.skip_input == item["input"]:
+                        item.update(status="skipped_by_user", finished_at=time.time())
+                        item["duration_seconds"] = max(0, item["finished_at"] - item["started_at"])
+                        item.pop("error", None)
+                        if not self.after.is_set():
+                            self.cancel.clear()
+                        self.skip_input = None
+                        self.save()
+                        continue
                     item["status"] = "done" if result.get("ok") else "stopped" if self.cancel.is_set() else "failed"
                     if not result.get("ok"):
+                        item["finished_at"] = time.time()
+                        item["duration_seconds"] = max(0, item["finished_at"] - item["started_at"])
                         item["error"] = result.get("error", "Image processing failed")
                         self.save()
                         if self.cancel.is_set():

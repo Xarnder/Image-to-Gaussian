@@ -18,6 +18,17 @@ def metadata(path):
         return {}
 
 
+def training_seconds(work):
+    final = work / "final"
+    for path in [*final.glob("*-report.json"), final / "report.json"]:
+        report = metadata(path)
+        seconds = report.get("training", report).get("train_seconds")
+        if isinstance(seconds, (int, float)) and seconds >= 0:
+            head = report.get("head_pass") or {}
+            return seconds + 60 * head.get("train_minutes", 0)
+    return None
+
+
 def catalogue():
     with LOCK:
         CACHE.mkdir(parents=True, exist_ok=True)
@@ -55,6 +66,10 @@ def catalogue():
                 identity = f"{work.relative_to(OUTPUT_DIR)}|{stat.st_mtime_ns}|{stat.st_size}"
                 key = hashlib.sha256(identity.encode()).hexdigest()[:24]
                 old = entries.get(key, {})
+                seconds = old.get("training_seconds")
+                if seconds is None:
+                    seconds = training_seconds(work)
+                old["training_seconds"] = seconds
                 if old.get("thumbnail") and (CACHE / old["thumbnail"]).is_file():
                     old["ply"] = str(ply)
                     continue
@@ -63,7 +78,7 @@ def catalogue():
                 source = naming.get("source_image") or (metadata(ingest).get("source") if ingest else None)
                 name = Path(source).name if source else naming.get("name") or (work.parent.name if work.name in ("video","v2") else ply.stem)
                 entry = {"name": name, "experiment": naming.get("experiment") or work.relative_to(OUTPUT_DIR).parts[0],
-                         "ply": str(ply), "created": stat.st_mtime, "thumbnail": None}
+                         "ply": str(ply), "created": stat.st_mtime, "training_seconds": seconds, "thumbnail": None}
                 candidates = [Path(source)] if source else []
                 candidates.extend([work / "frames" / "frame_0000.png", *work.glob("*_ingest/source_hr_rgba.png")])
                 for candidate in candidates:

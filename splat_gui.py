@@ -39,7 +39,7 @@ from i2g.splat_history import catalogue, CACHE as HISTORY_CACHE, metadata as his
 from i2g.paths import reviewed_names, OUTPUT_DIR, existing_experiments, find_deliverable, safe_run_name  # noqa: E402
 from i2g.pipeline import STAGE_TITLES, STAGES  # noqa: E402
 from i2g.video_options import VIDEO_STAGES, video_command, video_output, video_settings, archive_replaced_video
-from i2g.video_generation import VideoGeneration, default_prompt
+from i2g.video_generation import SUBJECT_SECTIONS, VideoGeneration, default_prompt, subject_preset
 from i2g.generated_batch import GeneratedBatch
 
 LAUNCH_LOCK = threading.RLock()
@@ -1906,7 +1906,8 @@ class Handler(BaseHTTPRequestHandler):
             self._json(200, GENERATION.snapshot() | {"batch": BATCH_GENERATION.snapshot()})
             return
         if path == "/api/generation/default-prompt":
-            self._json(200, {"prompt": default_prompt()})
+            human = default_prompt()
+            self._json(200, {"prompt": human, "subjects": {key: subject_preset(key, human) for key in ("human", *SUBJECT_SECTIONS)}})
             return
         if path == "/api/experiments":
             self._json(200, {"experiments": existing_experiments()})
@@ -1958,6 +1959,13 @@ class Handler(BaseHTTPRequestHandler):
                 except OSError:
                     pass
             self._json(200, result)
+            return
+        if path == "/api/generation/change-subject":
+            try:
+                result = BATCH_GENERATION.change_subject(body.get("batch_id"), body.get("input"), body.get("subject"))
+            except ValueError as exc:
+                result = {"ok": False, "error": str(exc)}
+            self._json(200 if result["ok"] else 409, result)
             return
         if path == "/api/batch-name-review":
             try:
@@ -2024,7 +2032,7 @@ class Handler(BaseHTTPRequestHandler):
                     photos = [Path(p) for p in paths]
                     if any(p.suffix.lower() not in IMAGE_TYPES for p in photos):
                         raise ValueError("Choose supported image files.")
-                    result = BATCH_GENERATION.append(body.get("batch_id"), photos, body.get("project_names"))
+                    result = BATCH_GENERATION.append(body.get("batch_id"), photos, body.get("project_names"), body.get("project_subjects"))
             except (KeyError, ValueError, TypeError, OSError) as exc:
                 result = {"ok": False, "error": str(exc)}
             self._json(200 if result["ok"] else 400, result)
@@ -2035,6 +2043,10 @@ class Handler(BaseHTTPRequestHandler):
                 return
             result = select_generated(body.get("id"), settings=body.get("settings"))
             self._json(200 if result.get("ok") else 400, result)
+            return
+        if path == "/api/generation/skip":
+            result = BATCH_GENERATION.skip_current(body.get("batch_id"), body.get("input"))
+            self._json(200 if result["ok"] else 409, result)
             return
         if path == "/api/generation/stop":
             self._json(200, BATCH_GENERATION.stop(str(body.get("how", "now"))) if BATCH_GENERATION.snapshot()["active"] else GENERATION.stop())

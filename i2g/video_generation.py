@@ -24,9 +24,43 @@ def default_prompt():
     return next(n for n in workflow["nodes"] if n["id"] == 133)["widgets_values_named"]["prompt"]
 
 
+SUBJECT_SECTIONS = {
+    "stylised": (
+        "Preserve the character as drawn or rendered in the reference, including its stylised proportions, "
+        "silhouette, eye shapes, linework, colours and shading. Maintain the same art style from every angle. "
+        "Keep the pose, expression, gaze, hair, clothing and accessories frozen in world space. "
+        "No blinking, eye tracking, breathing or secondary motion."
+    ),
+    "animal": (
+        "The animal is a frozen, photorealistic 3D capture. Keep its exact pose, body proportions, "
+        "markings, and surface detail throughout the orbit. Preserve the shape and position of all "
+        "visible features, including ears, limbs, wings, whiskers, and tail where present. "
+        "Hold visible eyes and eyelids in their original position relative to the head: no blinking "
+        "or tracking the camera. Freeze breathing, jaw movement, and movement of fur or feathers. "
+        "The animal and its surroundings remain fixed in world space."
+    ),
+    "object": (
+        "The object is a rigid, photorealistic 3D capture. Preserve its exact silhouette, proportions, "
+        "orientation, materials, markings, lettering, and surface details. Every component stays in "
+        "its original position relative to the whole. No rotation of the object, articulation, "
+        "deformation, or rearrangement of parts. The object, its supports, and the surroundings "
+        "remain fixed in world space."
+    ),
+}
+
+
+def subject_preset(subject, human):
+    opening, rest = human.split("\n\n", 1)
+    human_section, end = rest.split(" The camera alone moves", 1)
+    if subject != "human" and subject not in SUBJECT_SECTIONS:
+        raise ValueError("Choose a valid subject type.")
+    section = SUBJECT_SECTIONS.get(subject, human_section)
+    return {"section": section, "prompt": opening + "\n\n" + section + " The camera alone moves" + end}
+
+
 def generation_prompt(body):
     if body.get("custom_prompt_enabled") is not True:
-        return default_prompt()
+        return subject_preset(body.get("subject", "human"), default_prompt())["prompt"]
     prompt = body.get("custom_prompt")
     if not isinstance(prompt, str) or not prompt.strip():
         raise ValueError("Enter a custom MiniMax prompt, or turn off the custom prompt toggle.")
@@ -137,7 +171,7 @@ class VideoGeneration:
         with self.lock:
             result = copy.deepcopy(self.state)
             result["settings"] = {k: v for k, v in (self.body or {}).items()
-                                  if k in ("video_preset", "coverage", "initialization", "iterations", "stride", "max_height", "candidate_count", "custom_prompt_enabled", "custom_prompt")}
+                                  if k in ("video_preset", "coverage", "initialization", "iterations", "stride", "max_height", "candidate_count", "subject", "custom_prompt_enabled", "custom_prompt")}
             return result
 
     def update(self, **values):
@@ -178,7 +212,7 @@ class VideoGeneration:
             self.root, self.body = root, copy.deepcopy(body)
             self.cancel.clear()
             self.pending_approval = None
-            self.state = {"active": True, "status": "starting", "message": "Starting ComfyUI…", "input": str(source),
+            self.state = {"active": True, "status": "starting", "message": "Starting ComfyUIâ€¦", "input": str(source),
                           "experiment": experiment, "policy": policy, "requested": count, "completed": 0, "started_at": time.time(),
                           "candidates": candidates, "source_sha256": digest(source), "workflow_sha256": digest(WORKFLOW), "prompt": prompt}
             write_json(root / "workflow.json", json.loads(WORKFLOW.read_text(encoding="utf-8")))
@@ -206,7 +240,7 @@ class VideoGeneration:
             self.pending_approval = (candidate_id, callback)
             self.cancel.set()
             self.update(status="stopping", selected=candidate_id,
-                        message="Video approved. Cancelling remaining generation before reconstruction…")
+                        message="Video approved. Cancelling remaining generation before reconstructionâ€¦")
             return True
 
     def _cancel_prompt(self):
@@ -217,6 +251,31 @@ class VideoGeneration:
             self.client.interrupt()
         self.client._post_json("/queue", {"delete": [self.prompt_id]})
 
+    def _wait_for_batch_slot(self):
+        from urllib.error import URLError
+        started = False
+        while not self.cancel.is_set():
+            try:
+                queue = self.client._get_json("/queue")
+                if not queue["queue_running"] and not queue["queue_pending"]:
+                    return True
+            except (OSError, URLError) as exc:
+                if not started and isinstance(getattr(exc, "reason", exc), ConnectionRefusedError):
+                    start_comfy(COMFY_ROOT, COMFY_URL, LOGS_DIR, True, 900, stop_event=self.cancel)
+                    started = True
+                    continue
+            self.update(message="Waiting for ComfyUI to become ready. Remaining images are queued.")
+            self.cancel.wait(5)
+        return False
+
+    def generation_step(self, key, message=None):
+        steps = dict(self.state.get("generation_steps", {}))
+        previous = self.state.get("generation_step")
+        if previous:
+            steps[previous] = "done"
+        steps[key] = "running"
+        self.update(generation_step=key, generation_steps=steps, **({"message": message} if message else {}))
+
     def _generate(self, source, count, on_auto):
         gpu = GpuLock()
         selected = None
@@ -224,22 +283,30 @@ class VideoGeneration:
             if not gpu.try_acquire("MiniMax 360 video candidates"):
                 raise ValueError("Another pipeline is using the GPU. Wait for it to finish.")
             self.client = ComfyClient()
-            if not self.client.is_up():
-                start_comfy(COMFY_ROOT, COMFY_URL, LOGS_DIR, True, 900, stop_event=self.cancel)
-            if self.cancel.is_set():
-                return
-            if self.client.busy():
-                raise ValueError("ComfyUI has another running or queued job. Wait for it to finish.")
+            if self.body.get("generation_batch"):
+                if not self._wait_for_batch_slot():
+                    return
+            else:
+                if not self.client.is_up():
+                    start_comfy(COMFY_ROOT, COMFY_URL, LOGS_DIR, True, 900, stop_event=self.cancel)
+                if self.cancel.is_set():
+                    return
+                if self.client.busy():
+                    raise ValueError("ComfyUI has another running or queued job. Wait for it to finish.")
             workflow = json.loads((self.root / "workflow.json").read_text(encoding="utf-8"))
+            self.generation_step("prepare", "Preparing input image and video dimensions…")
             layout = image_layout(source)
             upload_source = prepare_video_image(source, self.root / "source_input.png", layout)
             self.update(image_layout=layout)
             write_json(self.root / "image_layout.json", layout)
+            self.generation_step("upload", "Uploading the prepared image to ComfyUI…")
             uploaded = self.client.upload_image(upload_source, subfolder="i2g/orbits", name=self.state["source_sha256"] + "_" + SIZING_VERSION + ".png")
+            self.generation_step("validate", "Checking required workflow nodes…")
             info = self.client.object_info()
             for index in range(count):
                 if self.cancel.is_set():
                     break
+                self.update(generation_steps={key:"done" for key in ("prepare", "upload", "validate")}, generation_step=None, candidate_index=index+1)
                 seed = secrets.randbits(50)
                 candidate_id = "orbit_" + secrets.token_hex(6)
                 graph = api_workflow(workflow, uploaded, seed, "video/i2g/" + candidate_id, self.state["prompt"], layout["video_size"])
@@ -247,11 +314,12 @@ class VideoGeneration:
                 if missing:
                     raise ValueError("ComfyUI is missing workflow nodes: " + ", ".join(missing))
                 write_json(self.root / (candidate_id + "_api.json"), graph)
-                self.update(status="generating", progress=0, message=f"Generating candidate {index+1} of {count} · seed {seed}")
+                self.update(status="generating", progress=0, message=f"Generating candidate {index+1} of {count} Â· seed {seed}")
                 ws = self.client._open_ws()
                 if ws:
                     ws.settimeout(1)
                 try:
+                    self.generation_step("queue", "Submitting the video workflow…")
                     self.prompt_id = self.client.queue(graph)
                     self.update(prompt_id=self.prompt_id)
                     deadline = time.monotonic() + 7200
@@ -259,7 +327,14 @@ class VideoGeneration:
                         if self.cancel.is_set():
                             self._cancel_prompt()
                             break
-                        entry = self.client.history(self.prompt_id)
+                        try:
+                            entry = self.client.history(self.prompt_id)
+                        except OSError:
+                            if time.monotonic() < deadline:
+                                self.update(message="Waiting for ComfyUI to respond. Tracking the same video job.")
+                                self.cancel.wait(3)
+                                continue
+                            entry = None
                         if entry and entry.get("status", {}).get("status_str") == "error":
                             raise RuntimeError(_format_error(entry["status"]))
                         if entry and entry.get("status", {}).get("completed"):
@@ -272,13 +347,18 @@ class VideoGeneration:
                                 raw = ws.recv()
                                 msg = json.loads(raw) if isinstance(raw, str) else {}
                                 data = msg.get("data", {})
-                                if data.get("prompt_id") == self.prompt_id and msg.get("type") == "progress":
-                                    self.update(progress=data['value']/max(1, data['max']), message=f"Candidate {index+1}/{count} · sampling {data['value']}/{data['max']}")
+                                if data.get("prompt_id") == self.prompt_id and msg.get("type") == "execution_cached":
+                                    steps = dict(self.state.get("generation_steps", {}))
+                                    steps.update({str(node): "cached" for node in data.get("nodes", [])})
+                                    self.update(generation_steps=steps)
+                                elif data.get("prompt_id") == self.prompt_id and msg.get("type") == "progress":
+                                    self.generation_step("127")
+                                    self.update(progress=data['value']/max(1, data['max']), message=f"Candidate {index+1}/{count} Â· sampling {data['value']}/{data['max']}")
                                 elif data.get("prompt_id") == self.prompt_id and msg.get("type") == "executing" and data.get("node"):
                                     labels = {"130": "loading text encoder", "129": "loading MiniMax video model", "121": "loading video decoder",
                                               "133": "encoding image and prompt", "127": "sampling video", "124": "decoding video frames", "92": "saving video"}
                                     label = labels.get(str(data["node"]), "preparing workflow")
-                                    self.update(message=f"Candidate {index+1}/{count} · {label}")
+                                    self.update(message=f"Candidate {index+1}/{count} Â· {label}")
                             except TimeoutError:
                                 pass
                             except Exception as exc:
@@ -295,10 +375,14 @@ class VideoGeneration:
                 outputs = [f for f in self.client.output_files(entry) if f.node_id == "92" and f.filename.lower().endswith(".mp4")]
                 if len(outputs) != 1:
                     raise RuntimeError("Workflow finished without one MP4 from SaveVideo.")
+                self.generation_step("download", "Copying the completed video into the project…")
                 path = self.client.download(outputs[0], self.root / (candidate_id + ".mp4"))
+                self.generation_step("verify", "Recording the candidate video and checksum…")
                 candidate = {"id": candidate_id, "path": str(path), "seed": seed, "sha256": digest(path)}
                 candidates = self.snapshot()["candidates"] + [candidate]
                 self.update(candidates=candidates, completed=index+1, progress=0)
+                steps = {key:"done" for key in self.state.get("generation_steps", {})}
+                self.update(generation_steps=steps, generation_step=None)
                 selected = candidate
                 self.prompt_id = None
             self.update(status="stopped" if self.cancel.is_set() else "review", message="Generation stopped. Completed videos are available." if self.cancel.is_set() else "Review the eyes and the complete orbit, then select a video or generate more.")
